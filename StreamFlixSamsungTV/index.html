@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1920, height=1080, initial-scale=1.0">
+    <title>StreamFlix IPTV — Samsung TV</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script type="text/javascript" src="$WEBAPIS/webapis/webapis.js"></script>
+</head>
+<body>
+    <!-- Login / Profile Screen -->
+    <div id="login-screen" class="screen active">
+        <div class="login-box">
+            <h1 class="brand-logo">STREAMFLIX</h1>
+            <p class="subtitle">Samsung Smart TV • Xtream Codes IPTV</p>
+
+            <div id="saved-profiles" class="profiles-list"></div>
+
+            <div class="login-form">
+                <input id="inp-profile" class="tv-focusable" type="text" placeholder="Profile Name (e.g. Living Room TV)" value="Living Room TV">
+                <input id="inp-host" class="tv-focusable" type="text" placeholder="Host URL (e.g. http://server.com:8080)">
+                <input id="inp-user" class="tv-focusable" type="text" placeholder="Username">
+                <input id="inp-pass" class="tv-focusable" type="password" placeholder="Password">
+                <div id="login-error" class="error-text"></div>
+                <button id="btn-signin" class="btn-primary tv-focusable">Sign In</button>
+                <button id="btn-login-exit" class="btn-secondary tv-focusable">⏻ Exit App</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App Screen -->
+    <div id="main-screen" class="screen">
+        <header class="top-nav">
+            <div class="nav-brand">STREAMFLIX</div>
+            <nav class="nav-tabs">
+                <button class="nav-tab tv-focusable active" data-tab="home">Home</button>
+                <button class="nav-tab tv-focusable" data-tab="movies">Movies</button>
+                <button class="nav-tab tv-focusable" data-tab="series">Series</button>
+                <button class="nav-tab tv-focusable" data-tab="live">Live TV</button>
+                <button class="nav-tab tv-focusable" data-tab="account">Account</button>
+            </nav>
+            <div class="nav-search">
+                <input id="global-search" class="tv-focusable" type="text" placeholder="ابحث بالعربي أو الإنجليزي...">
+            </div>
+            <button id="btn-exit-app" class="nav-tab nav-exit tv-focusable">⏻ Exit</button>
+        </header>
+
+        <main id="content-area" class="content-area"></main>
+    </div>
+
+    <!-- Series Episodes Modal -->
+    <div id="series-modal" class="modal hidden">
+        <div class="modal-card">
+            <div class="modal-header">
+                <div>
+                    <h2 id="series-modal-title"></h2>
+                    <p id="series-modal-plot" class="muted"></p>
+                </div>
+                <div class="modal-actions">
+                    <button id="btn-fav-series" class="btn-secondary tv-focusable">♡ My List</button>
+                    <button id="btn-close-series" class="btn-secondary tv-focusable">✕ Close</button>
+                </div>
+            </div>
+            <div id="season-tabs" class="season-tabs"></div>
+            <div id="episode-list" class="episode-list"></div>
+        </div>
+    </div>
+
+    <!-- TV-Friendly Category Picker Modal -->
+    <div id="category-modal" class="modal hidden">
+        <div class="modal-card cat-modal-card">
+            <div class="modal-header">
+                <h2>Select Category</h2>
+                <button id="btn-close-cat" class="btn-secondary tv-focusable">✕ Close</button>
+            </div>
+            <div id="category-list" class="episode-list"></div>
+        </div>
+    </div>
+
+    <!-- Fullscreen Video Player Overlay -->
+    <div id="player-screen" class="player-screen hidden">
+        <object id="av-player" type="application/avplayer" style="width:100%; height:100%; position:absolute; top:0; left:0;"></object>
+        <video id="html5-player" class="hidden" playsinline></video>
+
+        <div id="player-paused-badge" class="paused-badge hidden">
+            <div class="paused-circle">▶</div>
+            <div class="paused-label">PAUSED</div>
+        </div>
+
+        <div id="player-toast" class="player-toast hidden"></div>
+
+        <!-- Dish Receiver Channel Zap Banner -->
+        <div id="live-banner" class="live-banner hidden">
+            <div class="live-banner-num" id="live-banner-num">001</div>
+            <img id="live-banner-img" src="" onerror="this.style.opacity=0">
+            <div class="live-banner-info">
+                <div id="live-banner-name" class="live-banner-name"></div>
+                <div class="live-banner-meta"><span class="live-dot">● LIVE</span> • ▲▼ Flip Channels • OK Channel List • Return Back</div>
+            </div>
+        </div>
+
+        <!-- Dish Receiver Slide-Out Channel Drawer -->
+        <div id="live-drawer" class="live-drawer hidden">
+            <div class="live-drawer-header">
+                <h3>📺 Channels</h3>
+                <button id="btn-close-drawer" class="btn-secondary tv-focusable">✕</button>
+            </div>
+            <div id="live-drawer-list" class="live-drawer-list"></div>
+        </div>
+
+        <div id="player-hud" class="player-hud">
+            <div class="hud-top">
+                <button id="btn-player-back" class="btn-hud tv-focusable">✕ Back</button>
+                <div class="hud-title-box">
+                    <div id="hud-title" class="hud-title"></div>
+                    <div id="hud-subtitle" class="hud-sub"></div>
+                </div>
+                <div class="hud-right">
+                    <button id="btn-ch-prev" class="btn-hud tv-focusable hidden">CH -</button>
+                    <button id="btn-ch-next" class="btn-hud tv-focusable hidden">CH +</button>
+                    <button id="btn-skip-back" class="btn-hud tv-focusable">⏪ -10s</button>
+                    <button id="btn-play-pause" class="btn-hud tv-focusable">⏯ Play/Pause</button>
+                    <button id="btn-skip-fwd" class="btn-hud tv-focusable">⏩ +10s</button>
+                </div>
+            </div>
+            <div id="hud-progress-wrap" class="hud-bottom">
+                <span id="hud-cur-time">00:00</span>
+                <div class="progress-track"><div id="hud-progress-fill" class="progress-fill"></div></div>
+                <span id="hud-tot-time">00:00</span>
+            </div>
+        </div>
+
+        <!-- Netflix "Are You Still Watching?" Modal -->
+        <div id="sleep-modal" class="sleep-modal hidden">
+            <div class="sleep-card">
+                <h2>Are you still watching?</h2>
+                <p>Stopping automatically in <span id="sleep-countdown">60</span>s so you don't lose your place.</p>
+                <div class="sleep-btns">
+                    <button id="btn-still-watching" class="btn-primary tv-focusable">Continue Watching</button>
+                    <button id="btn-sleep-exit" class="btn-secondary tv-focusable">I'm Done</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>

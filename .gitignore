@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+._*
+
+# Xcode & Swift
+*.xcuserdata
+*.xcuserdatad/
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+DerivedData/
+build/
+.build/
+.swiftpm/
+
+# Tizen Studio
+StreamFlixSamsungTV/.settings/
+StreamFlixSamsungTV/.sdk.info
+StreamFlixSamsungTV/*.wgt
+
+# Archives & backups
+*.zip
