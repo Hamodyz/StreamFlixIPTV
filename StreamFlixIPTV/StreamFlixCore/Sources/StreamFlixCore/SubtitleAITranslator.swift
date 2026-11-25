@@ -102,33 +102,52 @@ public struct SubtitleAITranslator: Sendable {
         let batchSize = 45
         var translatedCues = cues
         let totalBatches = Int(ceil(Double(cues.count) / Double(batchSize)))
+        let maxConcurrent = 3
+        var completedBatches = 0
+        var nextBatch = 0
 
-        for batchIdx in 0..<totalBatches {
-            try Task.checkCancellation()
-            let start = batchIdx * batchSize
-            let end = min(start + batchSize, cues.count)
-            let slice = Array(cues[start..<end])
-            let sourceTexts = slice.map(\.text)
-
-            let translatedTexts = try await translateBatch(
-                lines: sourceTexts,
-                targetLanguage: targetLanguage,
-                apiKey: key
-            )
-
-            for i in 0..<slice.count {
-                let finalText = (i < translatedTexts.count && !translatedTexts[i].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    ? translatedTexts[i]
-                    : slice[i].text
-                translatedCues[start + i] = SRTCue(
-                    index: slice[i].index,
-                    timing: slice[i].timing,
-                    text: finalText
-                )
+        try await withThrowingTaskGroup(of: (Int, [String]).self) { group in
+            func enqueue(_ batchIdx: Int) {
+                let start = batchIdx * batchSize
+                let end = min(start + batchSize, cues.count)
+                let sourceTexts = cues[start..<end].map(\.text)
+                group.addTask {
+                    let translated = try await self.translateBatch(
+                        lines: sourceTexts,
+                        targetLanguage: targetLanguage,
+                        apiKey: key
+                    )
+                    return (batchIdx, translated)
+                }
             }
 
-            if let onProgress {
-                await onProgress(Double(batchIdx + 1) / Double(totalBatches))
+            while nextBatch < min(maxConcurrent, totalBatches) {
+                enqueue(nextBatch)
+                nextBatch += 1
+            }
+
+            while let (batchIdx, translatedTexts) = try await group.next() {
+                try Task.checkCancellation()
+                let start = batchIdx * batchSize
+                let end = min(start + batchSize, cues.count)
+                for i in 0..<(end - start) {
+                    let original = cues[start + i]
+                    let candidate = i < translatedTexts.count ? translatedTexts[i] : ""
+                    let finalText = candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? original.text : candidate
+                    translatedCues[start + i] = SRTCue(
+                        index: original.index,
+                        timing: original.timing,
+                        text: finalText
+                    )
+                }
+                completedBatches += 1
+                if let onProgress {
+                    await onProgress(Double(completedBatches) / Double(totalBatches))
+                }
+                if nextBatch < totalBatches {
+                    enqueue(nextBatch)
+                    nextBatch += 1
+                }
             }
         }
 
@@ -142,7 +161,7 @@ public struct SubtitleAITranslator: Sendable {
         targetLanguage: SubtitleLanguage,
         apiKey: String
     ) async throws -> [String] {
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(Self.model):generateContent?key=\(apiKey)") else {
+        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(Self.model):generateContent") else {
             throw SubtitleAITranslatorError.invalidResponse
         }
 
@@ -178,6 +197,7 @@ public struct SubtitleAITranslator: Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONEncoder().encode(body)
         request.timeoutInterval = 60
 

@@ -45,6 +45,11 @@ struct StreamFlixIPTVApp: App {
                         wireSyncCallbacks(for: activeCreds)
                         await catalogVM.loadAll(credentials: activeCreds)
                         await pullFromCloud(for: activeCreds)
+                        let watched = progressStore.records.values
+                            .sorted { $0.updatedAt > $1.updatedAt }
+                            .prefix(10)
+                            .map { $0.item.title.components(separatedBy: " • ").first ?? $0.item.title }
+                        await catalogVM.refreshAICuration(watchedTitles: watched)
                     }
                 } else {
                     LoginView(credentialsStore: credentialsStore)

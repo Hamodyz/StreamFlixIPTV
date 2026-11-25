@@ -63,7 +63,7 @@ public final class CloudSyncManager: ObservableObject {
         guard !trimmed.isEmpty,
               let url = URL(string: trimmed),
               let scheme = url.scheme?.lowercased(),
-              (scheme == "https" || scheme == "http"),
+              scheme == "https",
               url.host != nil else {
             return nil
         }

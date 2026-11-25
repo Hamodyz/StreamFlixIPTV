@@ -94,20 +94,33 @@ public actor XtreamAPIClient {
 
     // MARK: - Stream URL Builders (Optimized for Apple Hardware)
 
+    private nonisolated func encodePathSegment(_ raw: String) -> String {
+        var allowed = CharacterSet.urlPathAllowed
+        allowed.remove(charactersIn: "/?#%")
+        return raw.addingPercentEncoding(withAllowedCharacters: allowed) ?? raw
+    }
+
     /// Prefers `.m3u8` (HLS) for Live TV because AVPlayer buffers and recovers much faster on HLS than raw `.ts`.
     public nonisolated func liveStreamURL(streamId: Int, preferHLS: Bool = true) -> URL? {
         let ext = preferHLS ? "m3u8" : "ts"
-        return URL(string: "\(credentials.host)/live/\(credentials.username)/\(credentials.password)/\(streamId).\(ext)")
+        let user = encodePathSegment(credentials.username)
+        let pass = encodePathSegment(credentials.password)
+        return URL(string: "\(credentials.host)/live/\(user)/\(pass)/\(streamId).\(ext)")
     }
 
     public nonisolated func movieStreamURL(streamId: Int, containerExtension: String?) -> URL? {
-        let ext = (containerExtension?.isEmpty == false ? containerExtension! : "mp4")
-        return URL(string: "\(credentials.host)/movie/\(credentials.username)/\(credentials.password)/\(streamId).\(ext)")
+        let ext = encodePathSegment(containerExtension?.isEmpty == false ? containerExtension! : "mp4")
+        let user = encodePathSegment(credentials.username)
+        let pass = encodePathSegment(credentials.password)
+        return URL(string: "\(credentials.host)/movie/\(user)/\(pass)/\(streamId).\(ext)")
     }
 
     public nonisolated func episodeStreamURL(episodeId: String, containerExtension: String?) -> URL? {
-        let ext = (containerExtension?.isEmpty == false ? containerExtension! : "mp4")
-        return URL(string: "\(credentials.host)/series/\(credentials.username)/\(credentials.password)/\(episodeId).\(ext)")
+        let ext = encodePathSegment(containerExtension?.isEmpty == false ? containerExtension! : "mp4")
+        let user = encodePathSegment(credentials.username)
+        let pass = encodePathSegment(credentials.password)
+        let ep = encodePathSegment(episodeId)
+        return URL(string: "\(credentials.host)/series/\(user)/\(pass)/\(ep).\(ext)")
     }
 
     public nonisolated func buildPlayableMovie(_ movie: VODMovie) -> PlayableItem? {

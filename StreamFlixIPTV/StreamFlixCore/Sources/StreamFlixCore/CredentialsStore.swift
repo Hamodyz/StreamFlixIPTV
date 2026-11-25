@@ -49,13 +49,49 @@ public final class CredentialsStore: ObservableObject {
               let decoded = try? JSONDecoder().decode([XtreamCredentials].self, from: data) else {
             return
         }
-        savedProfiles = decoded
+        var needsMigration = false
+        let hydrated: [XtreamCredentials] = decoded.map { cred in
+            let accountKey = keychainAccount(for: cred)
+            if let keychainPass = KeychainHelper.load(account: accountKey), !keychainPass.isEmpty {
+                return XtreamCredentials(
+                    host: cred.host,
+                    username: cred.username,
+                    password: keychainPass,
+                    profileName: cred.profileName
+                )
+            } else if !cred.password.isEmpty {
+                KeychainHelper.save(cred.password, account: accountKey)
+                needsMigration = true
+            }
+            return cred
+        }
+        savedProfiles = hydrated
+        if needsMigration {
+            persist()
+        }
         let wasSignedOut = UserDefaults.standard.bool(forKey: signedOutKey)
-        activeProfile = wasSignedOut ? nil : decoded.first
+        activeProfile = wasSignedOut ? nil : hydrated.first
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(savedProfiles) else { return }
+        // Save passwords in encrypted Keychain and scrub them from UserDefaults
+        let sanitized = savedProfiles.map { cred -> XtreamCredentials in
+            let accountKey = keychainAccount(for: cred)
+            if !cred.password.isEmpty {
+                KeychainHelper.save(cred.password, account: accountKey)
+            }
+            return XtreamCredentials(
+                host: cred.host,
+                username: cred.username,
+                password: "",
+                profileName: cred.profileName
+            )
+        }
+        guard let data = try? JSONEncoder().encode(sanitized) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    private func keychainAccount(for cred: XtreamCredentials) -> String {
+        "xtream:\(cred.host)|\(cred.username)"
     }
 }

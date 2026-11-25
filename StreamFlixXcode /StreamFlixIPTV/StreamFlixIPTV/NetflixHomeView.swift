@@ -171,8 +171,39 @@ struct NetflixHomeView: View {
                         if let randomMovie = catalogVM.trendingMovies.randomElement() ?? catalogVM.movies.randomElement() {
                             catalogVM.playMovie(randomMovie)
                         }
+                    },
+                    onRefreshAI: {
+                        let watched = progressStore.records.values
+                            .sorted { $0.updatedAt > $1.updatedAt }
+                            .prefix(10)
+                            .map { $0.item.title.components(separatedBy: " • ").first ?? $0.item.title }
+                        Task {
+                            await catalogVM.refreshAICuration(watchedTitles: watched, forceRefresh: true)
+                        }
                     }
                 )
+
+                if let aiMsg = catalogVM.aiStatusMessage {
+                    HStack(spacing: 10) {
+                        Image(systemName: "sparkles")
+                            .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                        Text(aiMsg)
+                            .font(.caption)
+                            .foregroundStyle(.white)
+                            .multilineTextAlignment(.leading)
+                        Spacer()
+                        Button {
+                            catalogVM.aiStatusMessage = nil
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                    .padding(12)
+                    .background(Color.white.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+                    .padding(.horizontal, 16)
+                }
 
                 if !progressStore.continueWatchingList.isEmpty {
                     ContinueWatchingRow(
@@ -183,6 +214,22 @@ struct NetflixHomeView: View {
                         onRemove: { record in
                             progressStore.removeProgress(for: record.id)
                         }
+                    )
+                }
+
+                if !catalogVM.forYouMovies.isEmpty {
+                    MovieCarouselRow(
+                        title: catalogVM.forYouTitle,
+                        movies: catalogVM.forYouMovies,
+                        onSelect: { catalogVM.playMovie($0) }
+                    )
+                }
+
+                if !catalogVM.forYouSeries.isEmpty {
+                    SeriesCarouselRow(
+                        title: "Series Picks for You ✨",
+                        series: catalogVM.forYouSeries,
+                        onSelect: { selectedSeries = $0 }
                     )
                 }
 
@@ -254,6 +301,11 @@ struct NetflixHomeView: View {
         }
         .refreshable {
             await catalogVM.reload()
+            let watched = progressStore.records.values
+                .sorted { $0.updatedAt > $1.updatedAt }
+                .prefix(10)
+                .map { $0.item.title.components(separatedBy: " • ").first ?? $0.item.title }
+            await catalogVM.refreshAICuration(watchedTitles: watched, forceRefresh: true)
         }
     }
 }
@@ -306,6 +358,7 @@ private struct HomeDashboardHeader: View {
     let latestResume: WatchProgressRecord?
     let onResume: (WatchProgressRecord) -> Void
     let onSurpriseMovie: () -> Void
+    let onRefreshAI: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -384,6 +437,26 @@ private struct HomeDashboardHeader: View {
                         .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 1))
                     }
                     .buttonStyle(.plain)
+
+                    Button(action: onRefreshAI) {
+                        HStack(spacing: 6) {
+                            if catalogVM.isRefreshingAI {
+                                ProgressView().scaleEffect(0.7).tint(.white)
+                            } else {
+                                Image(systemName: "sparkles")
+                                    .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                            }
+                            Text("AI Picks")
+                                .font(.caption.bold())
+                                .foregroundStyle(.white)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color.white.opacity(0.10), in: Capsule())
+                        .overlay(Capsule().stroke(Color.white.opacity(0.16), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(catalogVM.isRefreshingAI)
                 }
             }
         }

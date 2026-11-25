@@ -106,13 +106,13 @@ public final class OpenSubtitlesSettings: ObservableObject {
 
     @Published public var apiKey: String {
         didSet {
-            UserDefaults.standard.set(apiKey, forKey: apiKeyStorageKey)
+            KeychainHelper.save(apiKey, account: keychainOpenSubtitlesAccount)
         }
     }
 
     @Published public var geminiAPIKey: String {
         didSet {
-            UserDefaults.standard.set(geminiAPIKey, forKey: geminiKeyStorageKey)
+            KeychainHelper.save(geminiAPIKey, account: keychainGeminiAccount)
         }
     }
 
@@ -122,13 +122,32 @@ public final class OpenSubtitlesSettings: ObservableObject {
         }
     }
 
-    private let apiKeyStorageKey = "StreamFlixIPTV.OpenSubtitlesApiKey.v1"
-    private let geminiKeyStorageKey = "StreamFlixIPTV.GeminiApiKey.v1"
+    private let keychainOpenSubtitlesAccount = "opensubtitles.api_key"
+    private let keychainGeminiAccount = "gemini.api_key"
     private let preferredLangStorageKey = "StreamFlixIPTV.PreferredSubtitleLang.v1"
 
     public init() {
-        self.apiKey = UserDefaults.standard.string(forKey: "StreamFlixIPTV.OpenSubtitlesApiKey.v1") ?? ""
-        self.geminiAPIKey = UserDefaults.standard.string(forKey: "StreamFlixIPTV.GeminiApiKey.v1") ?? ""
+        // Load from Keychain, migrating any legacy UserDefaults secrets once and removing them from plaintext UserDefaults.
+        if let kcOS = KeychainHelper.load(account: "opensubtitles.api_key") {
+            self.apiKey = kcOS
+        } else if let legacyOS = UserDefaults.standard.string(forKey: "StreamFlixIPTV.OpenSubtitlesApiKey.v1"), !legacyOS.isEmpty {
+            KeychainHelper.save(legacyOS, account: "opensubtitles.api_key")
+            UserDefaults.standard.removeObject(forKey: "StreamFlixIPTV.OpenSubtitlesApiKey.v1")
+            self.apiKey = legacyOS
+        } else {
+            self.apiKey = ""
+        }
+
+        if let kcGemini = KeychainHelper.load(account: "gemini.api_key") {
+            self.geminiAPIKey = kcGemini
+        } else if let legacyGemini = UserDefaults.standard.string(forKey: "StreamFlixIPTV.GeminiApiKey.v1"), !legacyGemini.isEmpty {
+            KeychainHelper.save(legacyGemini, account: "gemini.api_key")
+            UserDefaults.standard.removeObject(forKey: "StreamFlixIPTV.GeminiApiKey.v1")
+            self.geminiAPIKey = legacyGemini
+        } else {
+            self.geminiAPIKey = ""
+        }
+
         let savedLang = UserDefaults.standard.string(forKey: "StreamFlixIPTV.PreferredSubtitleLang.v1") ?? "en"
         self.preferredLanguage = SubtitleLanguage(rawValue: savedLang) ?? .english
     }

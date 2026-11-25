@@ -77,10 +77,13 @@ public final class CatalogViewModel: ObservableObject {
         self.seriesCategories = sc ?? []
         self.seriesList = s ?? []
 
-        // Pre-index categories and pre-compute Trending once (avoids O(N log N) lag on UI renders)
+        // Pre-index categories, normalized search titles, and Trending once (avoids lag on UI renders & typing)
         self.channelsByCategory = Dictionary(grouping: self.liveChannels, by: { $0.categoryId ?? "" })
         self.moviesByCategory = Dictionary(grouping: self.movies, by: { $0.categoryId ?? "" })
         self.seriesByCategory = Dictionary(grouping: self.seriesList, by: { $0.categoryId ?? "" })
+        self.normalizedChannels = self.liveChannels.map { ($0, Self.normalizeText($0.name)) }
+        self.normalizedMovies = self.movies.map { ($0, Self.normalizeText($0.name)) }
+        self.normalizedSeries = self.seriesList.map { ($0, Self.normalizeText($0.name)) }
 
         self.trendingMovies = self.movies
             .filter { !($0.streamIcon ?? "").isEmpty }
@@ -165,10 +168,18 @@ public final class CatalogViewModel: ObservableObject {
 
     @Published public private(set) var trendingMovies: [VODMovie] = []
     @Published public private(set) var trendingSeries: [SeriesItem] = []
+    @Published public private(set) var forYouMovies: [VODMovie] = []
+    @Published public private(set) var forYouSeries: [SeriesItem] = []
+    @Published public private(set) var forYouTitle: String = "Recommended for You ✨"
+    @Published public private(set) var isRefreshingAI = false
+    @Published public var aiStatusMessage: String?
 
     private var channelsByCategory: [String: [LiveChannel]] = [:]
     private var moviesByCategory: [String: [VODMovie]] = [:]
     private var seriesByCategory: [String: [SeriesItem]] = [:]
+    private var normalizedChannels: [(LiveChannel, String)] = []
+    private var normalizedMovies: [(VODMovie, String)] = []
+    private var normalizedSeries: [(SeriesItem, String)] = []
 
     public var featuredMovie: VODMovie? {
         trendingMovies.first ?? movies.first(where: { ($0.streamIcon ?? "").isEmpty == false }) ?? movies.first
@@ -186,9 +197,138 @@ public final class CatalogViewModel: ObservableObject {
         channelsByCategory[categoryId] ?? []
     }
 
+    // MARK: - AI Dynamic Trending & Personalized Recommendations
+
+    public func refreshAICuration(watchedTitles: [String], forceRefresh: Bool = false) async {
+        guard !movies.isEmpty || !seriesList.isEmpty else { return }
+        let settings = OpenSubtitlesSettings.shared
+        let favTitles = favoriteSeriesItems.map(\.name) + favoriteMovies.map(\.name)
+        aiStatusMessage = nil
+
+        guard settings.isGeminiConfigured else {
+            // Fallback without Gemini key: rotate a fresh mix of recent + top-rated items
+            let recentMovies = movies.filter { !($0.streamIcon ?? "").isEmpty }
+                .sorted { (Double($0.added ?? "0") ?? 0) > (Double($1.added ?? "0") ?? 0) }
+                .prefix(80)
+                .shuffled()
+            if !recentMovies.isEmpty {
+                self.trendingMovies = Array(recentMovies.prefix(20))
+            }
+            let topSeriesPool = seriesList.filter { !($0.cover ?? "").isEmpty }
+                .sorted { (Double($0.rating ?? "0") ?? 0) > (Double($1.rating ?? "0") ?? 0) }
+                .prefix(80)
+                .shuffled()
+            if !topSeriesPool.isEmpty {
+                self.trendingSeries = Array(topSeriesPool.prefix(20))
+            }
+            if forceRefresh {
+                aiStatusMessage = "Trending rotated! Add your free Gemini API Key in Account → Subtitles & AI Translation for personalized AI Picks."
+            }
+            return
+        }
+
+        isRefreshingAI = true
+        defer { isRefreshingAI = false }
+
+        do {
+            let ai = try await AIRecommendationsService().fetchRecommendations(
+                geminiAPIKey: settings.trimmedGeminiAPIKey,
+                watchedTitles: watchedTitles,
+                favoriteTitles: favTitles,
+                forceRefresh: forceRefresh
+            )
+
+            let matchedTrendingMovies = matchMovies(titles: ai.trendingMovies, limit: 20)
+            if !matchedTrendingMovies.isEmpty {
+                self.trendingMovies = topUpMovies(matchedTrendingMovies, from: self.trendingMovies, limit: 20)
+            }
+
+            let matchedTrendingSeries = matchSeries(titles: ai.trendingSeries, limit: 20)
+            if !matchedTrendingSeries.isEmpty {
+                self.trendingSeries = topUpSeries(matchedTrendingSeries, from: self.trendingSeries, limit: 20)
+            }
+
+            self.forYouMovies = matchMovies(titles: ai.forYouMovies, limit: 20)
+            self.forYouSeries = matchSeries(titles: ai.forYouSeries, limit: 20)
+            if let reason = ai.forYouReason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                self.forYouTitle = "\(reason) ✨"
+            }
+            if forceRefresh {
+                aiStatusMessage = "✨ AI updated: \(matchedTrendingMovies.count) trending movies, \(matchedTrendingSeries.count) series, \(forYouMovies.count + forYouSeries.count) picks for you."
+            }
+        } catch {
+            aiStatusMessage = "AI Picks error: \(error.localizedDescription)"
+        }
+    }
+
+    private static func looseMatchKey(_ text: String) -> String {
+        let normalized = normalizeText(text)
+        let cleaned = normalized.unicodeScalars.map { CharacterSet.alphanumerics.contains($0) ? Character($0) : " " }
+        return String(cleaned)
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func matchMovies(titles: [String], limit: Int) -> [VODMovie] {
+        var seen = Set<Int>()
+        var matched: [VODMovie] = []
+        for rawTitle in titles {
+            let q = Self.normalizeText(rawTitle)
+            let looseQ = Self.looseMatchKey(rawTitle)
+            guard q.count >= 2 else { continue }
+            if let hit = normalizedMovies.first(where: { $0.1 == q || Self.looseMatchKey($0.1) == looseQ })?.0
+                ?? normalizedMovies.first(where: { ($0.1.contains(q) || Self.looseMatchKey($0.1).contains(looseQ)) && !($0.0.streamIcon ?? "").isEmpty })?.0 {
+                if seen.insert(hit.streamId).inserted {
+                    matched.append(hit)
+                    if matched.count >= limit { break }
+                }
+            }
+        }
+        return matched
+    }
+
+    private func matchSeries(titles: [String], limit: Int) -> [SeriesItem] {
+        var seen = Set<Int>()
+        var matched: [SeriesItem] = []
+        for rawTitle in titles {
+            let q = Self.normalizeText(rawTitle)
+            let looseQ = Self.looseMatchKey(rawTitle)
+            guard q.count >= 2 else { continue }
+            if let hit = normalizedSeries.first(where: { $0.1 == q || Self.looseMatchKey($0.1) == looseQ })?.0
+                ?? normalizedSeries.first(where: { ($0.1.contains(q) || Self.looseMatchKey($0.1).contains(looseQ)) && !($0.0.cover ?? "").isEmpty })?.0 {
+                if seen.insert(hit.seriesId).inserted {
+                    matched.append(hit)
+                    if matched.count >= limit { break }
+                }
+            }
+        }
+        return matched
+    }
+
+    private func topUpMovies(_ primary: [VODMovie], from fallback: [VODMovie], limit: Int) -> [VODMovie] {
+        var result = primary
+        var seen = Set(primary.map(\.streamId))
+        for item in fallback where seen.insert(item.streamId).inserted {
+            result.append(item)
+            if result.count >= limit { break }
+        }
+        return result
+    }
+
+    private func topUpSeries(_ primary: [SeriesItem], from fallback: [SeriesItem], limit: Int) -> [SeriesItem] {
+        var result = primary
+        var seen = Set(primary.map(\.seriesId))
+        for item in fallback where seen.insert(item.seriesId).inserted {
+            result.append(item)
+            if result.count >= limit { break }
+        }
+        return result
+    }
+
     // MARK: - Instant Universal Search (Arabic + English Normalized)
 
-    public func normalize(_ text: String) -> String {
+    public static func normalizeText(_ text: String) -> String {
         let lower = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines)
         var result = ""
         result.reserveCapacity(lower.count)
@@ -210,28 +350,32 @@ public final class CatalogViewModel: ObservableObject {
         return result
     }
 
+    public func normalize(_ text: String) -> String {
+        Self.normalizeText(text)
+    }
+
     public func matches(_ title: String, query: String) -> Bool {
-        let q = normalize(query)
+        let q = Self.normalizeText(query)
         guard !q.isEmpty else { return true }
-        return normalize(title).contains(q)
+        return Self.normalizeText(title).contains(q)
     }
 
     public var filteredChannels: [LiveChannel] {
-        let q = normalize(searchQuery)
+        let q = Self.normalizeText(searchQuery)
         guard !q.isEmpty else { return liveChannels }
-        return liveChannels.filter { normalize($0.name).contains(q) }
+        return normalizedChannels.compactMap { $0.1.contains(q) ? $0.0 : nil }
     }
 
     public var filteredMovies: [VODMovie] {
-        let q = normalize(searchQuery)
+        let q = Self.normalizeText(searchQuery)
         guard !q.isEmpty else { return movies }
-        return movies.filter { normalize($0.name).contains(q) }
+        return normalizedMovies.compactMap { $0.1.contains(q) ? $0.0 : nil }
     }
 
     public var filteredSeries: [SeriesItem] {
-        let q = normalize(searchQuery)
+        let q = Self.normalizeText(searchQuery)
         guard !q.isEmpty else { return seriesList }
-        return seriesList.filter { normalize($0.name).contains(q) }
+        return normalizedSeries.compactMap { $0.1.contains(q) ? $0.0 : nil }
     }
 
     // MARK: - Playback
