@@ -26,7 +26,7 @@ public struct AIRecommendationTitles: Codable, Sendable {
 }
 
 public struct AIRecommendationsService: Sendable {
-    private static let model = "gemini-2.5-flash"
+    private static let model = "gemini-3.8-flash"
     private static let cacheKey = "StreamFlixIPTV.AICuratorCache.v1"
     private static let cacheTTL: TimeInterval = 12 * 3600 // 12 hours
 
@@ -80,10 +80,10 @@ public struct AIRecommendationsService: Sendable {
 
         Return ONLY a valid JSON object with these exact keys:
         {
-          "trendingMovies": [25 popular, trending, and top-rated movies right now (mix of 2024-2026 hits and all-time crowd-pleasers)],
-          "trendingSeries": [25 popular, trending, and top-rated TV series and anime right now],
-          "forYouMovies": [20 movies specifically similar in genre/vibe to the user's watched & favorite titles (or top diverse hits if none)],
-          "forYouSeries": [20 series/anime specifically similar in genre/vibe to the user's watched & favorite titles (or top diverse hits if none)],
+          "trendingMovies": [15 popular, trending, and top-rated movies right now (mix of 2024-2026 hits and all-time crowd-pleasers)],
+          "trendingSeries": [15 popular, trending, and top-rated TV series and anime right now],
+          "forYouMovies": [12 movies specifically similar in genre/vibe to the user's watched & favorite titles (or top diverse hits if none)],
+          "forYouSeries": [12 series/anime specifically similar in genre/vibe to the user's watched & favorite titles (or top diverse hits if none)],
           "forYouReason": "A short 3-6 word label like 'Because you watch Anime & Action' or 'Top Picks for You'"
         }
 
@@ -102,7 +102,7 @@ public struct AIRecommendationsService: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = 30
+        request.timeoutInterval = 90
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {

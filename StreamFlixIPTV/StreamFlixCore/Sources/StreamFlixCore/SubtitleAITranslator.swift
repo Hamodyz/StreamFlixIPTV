@@ -21,7 +21,7 @@ public enum SubtitleAITranslatorError: LocalizedError, Sendable {
 }
 
 public struct SubtitleAITranslator: Sendable {
-    private static let model = "gemini-2.5-flash"
+    private static let model = "gemini-3.8-flash"
 
     public init() {}
 
@@ -199,7 +199,7 @@ public struct SubtitleAITranslator: Sendable {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = 60
+        request.timeoutInterval = 90
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {

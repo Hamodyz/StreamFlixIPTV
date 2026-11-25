@@ -82,8 +82,8 @@ public final class CatalogViewModel: ObservableObject {
         self.moviesByCategory = Dictionary(grouping: self.movies, by: { $0.categoryId ?? "" })
         self.seriesByCategory = Dictionary(grouping: self.seriesList, by: { $0.categoryId ?? "" })
         self.normalizedChannels = self.liveChannels.map { ($0, Self.normalizeText($0.name)) }
-        self.normalizedMovies = self.movies.map { ($0, Self.normalizeText($0.name)) }
-        self.normalizedSeries = self.seriesList.map { ($0, Self.normalizeText($0.name)) }
+        self.normalizedMovies = self.movies.map { ($0, Self.normalizeText($0.name), Self.looseMatchKey($0.name)) }
+        self.normalizedSeries = self.seriesList.map { ($0, Self.normalizeText($0.name), Self.looseMatchKey($0.name)) }
 
         self.trendingMovies = self.movies
             .filter { !($0.streamIcon ?? "").isEmpty }
@@ -178,8 +178,8 @@ public final class CatalogViewModel: ObservableObject {
     private var moviesByCategory: [String: [VODMovie]] = [:]
     private var seriesByCategory: [String: [SeriesItem]] = [:]
     private var normalizedChannels: [(LiveChannel, String)] = []
-    private var normalizedMovies: [(VODMovie, String)] = []
-    private var normalizedSeries: [(SeriesItem, String)] = []
+    private var normalizedMovies: [(VODMovie, String, String)] = []
+    private var normalizedSeries: [(SeriesItem, String, String)] = []
 
     public var featuredMovie: VODMovie? {
         trendingMovies.first ?? movies.first(where: { ($0.streamIcon ?? "").isEmpty == false }) ?? movies.first
@@ -277,8 +277,8 @@ public final class CatalogViewModel: ObservableObject {
             let q = Self.normalizeText(rawTitle)
             let looseQ = Self.looseMatchKey(rawTitle)
             guard q.count >= 2 else { continue }
-            if let hit = normalizedMovies.first(where: { $0.1 == q || Self.looseMatchKey($0.1) == looseQ })?.0
-                ?? normalizedMovies.first(where: { ($0.1.contains(q) || Self.looseMatchKey($0.1).contains(looseQ)) && !($0.0.streamIcon ?? "").isEmpty })?.0 {
+            if let hit = normalizedMovies.first(where: { $0.1 == q || $0.2 == looseQ })?.0
+                ?? normalizedMovies.first(where: { ($0.1.contains(q) || $0.2.contains(looseQ)) && !($0.0.streamIcon ?? "").isEmpty })?.0 {
                 if seen.insert(hit.streamId).inserted {
                     matched.append(hit)
                     if matched.count >= limit { break }
@@ -295,8 +295,8 @@ public final class CatalogViewModel: ObservableObject {
             let q = Self.normalizeText(rawTitle)
             let looseQ = Self.looseMatchKey(rawTitle)
             guard q.count >= 2 else { continue }
-            if let hit = normalizedSeries.first(where: { $0.1 == q || Self.looseMatchKey($0.1) == looseQ })?.0
-                ?? normalizedSeries.first(where: { ($0.1.contains(q) || Self.looseMatchKey($0.1).contains(looseQ)) && !($0.0.cover ?? "").isEmpty })?.0 {
+            if let hit = normalizedSeries.first(where: { $0.1 == q || $0.2 == looseQ })?.0
+                ?? normalizedSeries.first(where: { ($0.1.contains(q) || $0.2.contains(looseQ)) && !($0.0.cover ?? "").isEmpty })?.0 {
                 if seen.insert(hit.seriesId).inserted {
                     matched.append(hit)
                     if matched.count >= limit { break }
