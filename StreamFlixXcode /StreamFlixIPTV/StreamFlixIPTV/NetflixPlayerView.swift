@@ -132,6 +132,19 @@ final class VLCPlayerController: NSObject, ObservableObject, VLCMediaPlayerDeleg
         currentSubtitleIndex = index
     }
 
+    func disableSubtitles() {
+        mediaPlayer.currentVideoSubTitleIndex = -1
+        currentSubtitleIndex = -1
+    }
+
+    func loadExternalSubtitle(url: URL) {
+        mediaPlayer.addPlaybackSlave(url, type: .subtitle, enforce: true)
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            self?.refreshTracks()
+        }
+    }
+
     func stop() {
         saveCheckpointNow()
         mediaPlayer.stop()
@@ -258,6 +271,9 @@ struct NetflixPlayerView: View {
     @State private var bannerTask: Task<Void, Never>?
     @State private var showEpisodeDrawer = false
     @State private var episodeSeasons: [Int: [EpisodeItem]] = [:]
+    @ObservedObject private var openSubtitlesSettings = OpenSubtitlesSettings.shared
+    @State private var showSubtitleSheet = false
+    @State private var hasExternalSubtitle = false
 
     var body: some View {
         ZStack {
@@ -624,10 +640,20 @@ struct NetflixPlayerView: View {
         .onChange(of: item.id) { _, _ in
             cancelNextEpisodeCountdown()
             useRawTSForLive = false
+            hasExternalSubtitle = false
             vlc.load(item: item, progressStore: engine.progressStore)
             refreshResolvedNextEpisode()
             revealControlsTemporarily()
             if item.kind == .live { triggerChannelBanner() }
+        }
+        .sheet(isPresented: $showSubtitleSheet) {
+            OpenSubtitlesPickerSheet(
+                item: item,
+                vlc: vlc,
+                settings: openSubtitlesSettings,
+                hasExternalSubtitle: $hasExternalSubtitle,
+                onToast: { showToast($0) }
+            )
         }
         .onChange(of: vlc.isPlaying) { _, playing in
             if playing {
@@ -765,6 +791,21 @@ struct NetflixPlayerView: View {
                 titlePill
                 Spacer()
 
+            if item.kind != .live {
+                Button {
+                    sleepGuard.registerUserInteraction()
+                    showSubtitleSheet = true
+                } label: {
+                    Label("CC", systemImage: (vlc.currentSubtitleIndex > 0 || hasExternalSubtitle) ? "captions.bubble.fill" : "captions.bubble")
+                        .font(.caption.bold())
+                        .foregroundStyle((vlc.currentSubtitleIndex > 0 || hasExternalSubtitle) ? Color(red: 0.898, green: 0.035, blue: 0.078) : .white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.65), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+
             // Quality / Buffer / Audio / Subtitle Tracks Menu
             Menu {
                 if item.kind == .live {
@@ -808,8 +849,22 @@ struct NetflixPlayerView: View {
                     }
                 }
 
-                if !vlc.subtitleTracks.isEmpty {
+                if item.kind != .live || !vlc.subtitleTracks.isEmpty {
                     Section("Subtitles") {
+                        if item.kind != .live {
+                            Button {
+                                showSubtitleSheet = true
+                            } label: {
+                                Label("OpenSubtitles & AI Translate...", systemImage: "captions.bubble")
+                            }
+                        }
+                        if vlc.currentSubtitleIndex > 0 || hasExternalSubtitle {
+                            Button("Turn Off Subtitles") {
+                                vlc.disableSubtitles()
+                                hasExternalSubtitle = false
+                                showToast("Subtitles Off")
+                            }
+                        }
                         ForEach(vlc.subtitleTracks, id: \.index) { sub in
                             Button(sub.index == vlc.currentSubtitleIndex ? "✓ \(sub.name)" : sub.name) {
                                 vlc.selectSubtitleTrack(sub.index)
@@ -1360,6 +1415,369 @@ private struct AreYouStillWatchingOverlay: View {
                 }
             }
             .padding(28)
+        }
+    }
+}
+
+// MARK: - OpenSubtitles & AI Subtitle Picker Sheet
+
+private struct OpenSubtitlesPickerSheet: View {
+    let item: PlayableItem
+    @ObservedObject var vlc: VLCPlayerController
+    @ObservedObject var settings: OpenSubtitlesSettings
+    @Binding var hasExternalSubtitle: Bool
+    let onToast: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedLanguage: SubtitleLanguage = .english
+    @State private var searchText: String = ""
+    @State private var extractedYear: Int?
+    @State private var results: [OpenSubtitlesSubtitleResult] = []
+    @State private var isSearching = false
+    @State private var downloadingFileId: Int?
+    @State private var isTranslatingAI = false
+    @State private var translationProgress: Double = 0
+    @State private var errorMessage: String?
+
+    private let service = OpenSubtitlesService()
+    private let translator = SubtitleAITranslator()
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if !vlc.subtitleTracks.isEmpty || hasExternalSubtitle {
+                    Section("Embedded / Active Tracks") {
+                        Button {
+                            vlc.disableSubtitles()
+                            hasExternalSubtitle = false
+                            onToast("Subtitles Off")
+                            dismiss()
+                        } label: {
+                            HStack {
+                                Text("Off")
+                                Spacer()
+                                if vlc.currentSubtitleIndex <= 0 && !hasExternalSubtitle {
+                                    Image(systemName: "checkmark")
+                                        .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                                }
+                            }
+                        }
+
+                        ForEach(vlc.subtitleTracks, id: \.index) { sub in
+                            Button {
+                                vlc.selectSubtitleTrack(sub.index)
+                                onToast(sub.name)
+                                dismiss()
+                            } label: {
+                                HStack {
+                                    Text(sub.name)
+                                    Spacer()
+                                    if sub.index == vlc.currentSubtitleIndex {
+                                        Image(systemName: "checkmark")
+                                            .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Section("Language & Search") {
+                    Picker("Language", selection: $selectedLanguage) {
+                        ForEach(SubtitleLanguage.allCases) { lang in
+                            Text("\(lang.flag) \(lang.displayName)").tag(lang)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .onChange(of: selectedLanguage) { _, newLang in
+                        settings.preferredLanguage = newLang
+                        runSearch()
+                    }
+
+                    if !settings.isConfigured {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("OpenSubtitles API Key is required to search and download subtitles.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                            SecureField("Paste OpenSubtitles API Key here", text: $settings.apiKey)
+                                .textFieldStyle(.roundedBorder)
+                                .autocorrectionDisabled()
+                                #if os(iOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                            Text("You can also manage this anytime in Account → Subtitles.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 4)
+                    }
+
+                    HStack(spacing: 8) {
+                        TextField("Movie or Series title...", text: $searchText)
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled()
+                            .onSubmit { runSearch() }
+                        Button("Search") {
+                            runSearch()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(Color(red: 0.898, green: 0.035, blue: 0.078))
+                        .disabled(!settings.isConfigured || isSearching || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+
+                    if item.kind == .episode, let s = item.seasonNumber, let e = item.episodeNumber {
+                        Text("Matching Episode: S\(s):E\(e)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if selectedLanguage != .english {
+                    Section {
+                        if !settings.isGeminiConfigured {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Paste your Gemini API Key to translate English subtitles to \(selectedLanguage.displayName) with AI.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                SecureField("Gemini API Key (aistudio.google.com)", text: $settings.geminiAPIKey)
+                                    .textFieldStyle(.roundedBorder)
+                                    .autocorrectionDisabled()
+                                    #if os(iOS)
+                                    .textInputAutocapitalization(.never)
+                                    #endif
+                            }
+                            .padding(.vertical, 4)
+                        }
+
+                        if isTranslatingAI {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    ProgressView()
+                                    Text("Translating to \(selectedLanguage.displayName) with AI (\(Int(translationProgress * 100))%)...")
+                                        .font(.subheadline.weight(.medium))
+                                }
+                                ProgressView(value: translationProgress)
+                                    .tint(Color(red: 0.898, green: 0.035, blue: 0.078))
+                            }
+                            .padding(.vertical, 4)
+                        } else {
+                            Button {
+                                translateBestEnglishWithAI()
+                            } label: {
+                                HStack(spacing: 10) {
+                                    Image(systemName: "sparkles")
+                                        .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Translate English Subtitle with AI → \(selectedLanguage.displayName)")
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                        Text("Downloads the top English match and translates it cleanly via Gemini.")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .disabled(!settings.isConfigured || !settings.isGeminiConfigured || downloadingFileId != nil)
+                        }
+                    } header: {
+                        Text("AI Translation (Gemini)")
+                    }
+                }
+
+                Section("OpenSubtitles (\(selectedLanguage.displayName))") {
+                    if isSearching {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Searching OpenSubtitles...")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else if let errorMessage {
+                        Text(errorMessage)
+                            .font(.subheadline)
+                            .foregroundStyle(.red)
+                    } else if results.isEmpty && settings.isConfigured {
+                        Text("No \(selectedLanguage.displayName) subtitles found. Try editing the title above or use AI Translation.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(results) { sub in
+                            Button {
+                                downloadAndAttach(sub)
+                            } label: {
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(sub.release)
+                                            .font(.subheadline.weight(.semibold))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(2)
+                                        HStack(spacing: 8) {
+                                            if sub.fromTrusted {
+                                                Text("Trusted")
+                                                    .font(.caption2.bold())
+                                                    .padding(.horizontal, 6)
+                                                    .padding(.vertical, 2)
+                                                    .background(Color.green.opacity(0.2), in: Capsule())
+                                                    .foregroundStyle(.green)
+                                            }
+                                            Text("⬇︎ \(sub.downloadCount)")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            if sub.ratings > 0 {
+                                                Text("★ \(String(format: "%.1f", sub.ratings))")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                    }
+                                    Spacer()
+                                    if downloadingFileId == sub.fileId {
+                                        ProgressView()
+                                    } else {
+                                        Image(systemName: "arrow.down.circle")
+                                            .font(.title3)
+                                            .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                                    }
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            .disabled(downloadingFileId != nil || isTranslatingAI)
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Subtitles")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+            .onAppear {
+                selectedLanguage = settings.preferredLanguage
+                if searchText.isEmpty {
+                    let parsed = OpenSubtitlesService.cleanSearchQuery(from: item.title, kind: item.kind)
+                    searchText = parsed.query
+                    extractedYear = parsed.year
+                }
+                if settings.isConfigured && results.isEmpty {
+                    runSearch()
+                }
+            }
+        }
+        #if os(macOS)
+        .frame(minWidth: 460, minHeight: 460)
+        #endif
+    }
+
+    private func runSearch() {
+        guard settings.isConfigured else { return }
+        isSearching = true
+        errorMessage = nil
+        let query = searchText
+        let lang = selectedLanguage
+        let season = (item.kind == .episode) ? item.seasonNumber : nil
+        let episode = (item.kind == .episode) ? item.episodeNumber : nil
+        let kind = item.kind
+        let year = extractedYear
+        let key = settings.trimmedAPIKey
+
+        Task {
+            do {
+                let found = try await service.searchSubtitles(
+                    apiKey: key,
+                    query: query,
+                    language: lang,
+                    seasonNumber: season,
+                    episodeNumber: episode,
+                    mediaKind: kind,
+                    year: year
+                )
+                results = found
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isSearching = false
+        }
+    }
+
+    private func downloadAndAttach(_ sub: OpenSubtitlesSubtitleResult) {
+        downloadingFileId = sub.fileId
+        errorMessage = nil
+        let key = settings.trimmedAPIKey
+        let lang = selectedLanguage
+        Task {
+            do {
+                let outcome = try await service.downloadSubtitle(
+                    apiKey: key,
+                    fileId: sub.fileId,
+                    preferredFileName: sub.fileName
+                )
+                vlc.loadExternalSubtitle(url: outcome.localURL)
+                hasExternalSubtitle = true
+                onToast("\(lang.flag) \(lang.displayName) Subtitles Loaded")
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            downloadingFileId = nil
+        }
+    }
+
+    private func translateBestEnglishWithAI() {
+        guard settings.isConfigured, settings.isGeminiConfigured else { return }
+        isTranslatingAI = true
+        translationProgress = 0.05
+        errorMessage = nil
+        let query = searchText
+        let targetLang = selectedLanguage
+        let season = (item.kind == .episode) ? item.seasonNumber : nil
+        let episode = (item.kind == .episode) ? item.episodeNumber : nil
+        let kind = item.kind
+        let year = extractedYear
+        let osKey = settings.trimmedAPIKey
+        let geminiKey = settings.trimmedGeminiAPIKey
+
+        Task {
+            do {
+                let enResults = try await service.searchSubtitles(
+                    apiKey: osKey,
+                    query: query,
+                    language: .english,
+                    seasonNumber: season,
+                    episodeNumber: episode,
+                    mediaKind: kind,
+                    year: year
+                )
+                guard let best = enResults.first else {
+                    errorMessage = "No English subtitle found to translate."
+                    isTranslatingAI = false
+                    return
+                }
+                let downloaded = try await service.downloadSubtitle(
+                    apiKey: osKey,
+                    fileId: best.fileId,
+                    preferredFileName: best.fileName
+                )
+                let translatedURL = try await translator.translateSRTFile(
+                    sourceURL: downloaded.localURL,
+                    fileId: best.fileId,
+                    targetLanguage: targetLang,
+                    geminiAPIKey: geminiKey,
+                    onProgress: { progress in
+                        translationProgress = progress
+                    }
+                )
+                vlc.loadExternalSubtitle(url: translatedURL)
+                hasExternalSubtitle = true
+                onToast("✨ \(targetLang.flag) AI \(targetLang.displayName) Subtitles Loaded")
+                dismiss()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isTranslatingAI = false
         }
     }
 }

@@ -40,6 +40,7 @@ struct StreamFlixIPTVApp: App {
                         credentialsStore: credentialsStore,
                         syncManager: syncManager
                     )
+                    .environmentObject(progressStore)
                     .task(id: activeCreds.host + activeCreds.username) {
                         wireSyncCallbacks(for: activeCreds)
                         await catalogVM.loadAll(credentials: activeCreds)

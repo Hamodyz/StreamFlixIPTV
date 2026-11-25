@@ -107,13 +107,24 @@ public final class WatchProgressStore: ObservableObject {
             durationSeconds: duration,
             updatedAt: Date()
         )
-        if record.isCompleted {
+        if record.isCompleted && item.kind != .episode {
             records.removeValue(forKey: item.id)
         } else {
             records[item.id] = record
         }
         persist()
         onDidChange?()
+    }
+
+    public func latestRecord(forSeriesId seriesId: Int) -> WatchProgressRecord? {
+        records.values
+            .filter { $0.item.kind == .episode && $0.item.seriesId == seriesId }
+            .sorted { $0.updatedAt > $1.updatedAt }
+            .first
+    }
+
+    public func progressRecord(forEpisodeId episodeId: String) -> WatchProgressRecord? {
+        records["episode-\(episodeId)"]
     }
 
     public func removeProgress(for itemId: String) {
@@ -130,7 +141,7 @@ public final class WatchProgressStore: ObservableObject {
                     records[id] = remoteRec
                     changed = true
                 }
-            } else if !remoteRec.isCompleted {
+            } else if !remoteRec.isCompleted || remoteRec.item.kind == .episode {
                 records[id] = remoteRec
                 changed = true
             }

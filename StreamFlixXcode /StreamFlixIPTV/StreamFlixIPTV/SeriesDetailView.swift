@@ -4,11 +4,16 @@ import StreamFlixCore
 struct SeriesDetailView: View {
     let series: SeriesItem
     @ObservedObject var catalogVM: CatalogViewModel
+    @EnvironmentObject private var progressStore: WatchProgressStore
 
     @State private var seasons: [Int: [EpisodeItem]] = [:]
     @State private var selectedSeason: Int = 1
     @State private var isLoading = true
     @State private var metadata: SeriesInfoResponse.SeriesMetadata?
+
+    private var lastWatchedRecord: WatchProgressRecord? {
+        progressStore.latestRecord(forSeriesId: series.seriesId)
+    }
 
     var body: some View {
         ZStack {
@@ -51,6 +56,26 @@ struct SeriesDetailView: View {
                             .buttonStyle(.plain)
                         }
 
+                        if let lastRec = lastWatchedRecord {
+                            Button {
+                                catalogVM.activePlayerItem = lastRec.item
+                            } label: {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "play.fill")
+                                    let sNum = lastRec.item.seasonNumber ?? 1
+                                    let eNum = lastRec.item.episodeNumber ?? 1
+                                    Text(lastRec.isCompleted ? "Last Watched: S\(sNum):E\(eNum)" : "Resume S\(sNum):E\(eNum)")
+                                        .fontWeight(.bold)
+                                }
+                                .font(.subheadline)
+                                .foregroundStyle(.black)
+                                .padding(.horizontal, 18)
+                                .padding(.vertical, 10)
+                                .background(.white, in: RoundedRectangle(cornerRadius: 8))
+                            }
+                            .buttonStyle(.plain)
+                        }
+
                         if let plot = metadata?.plot ?? series.plot, !plot.isEmpty {
                             Text(plot)
                                 .font(.subheadline)
@@ -76,6 +101,8 @@ struct SeriesDetailView: View {
                         let currentEpisodes = seasons[selectedSeason] ?? []
                         LazyVStack(spacing: 12) {
                             ForEach(Array(currentEpisodes.enumerated()), id: \.element.id) { index, episode in
+                                let epProgress = progressStore.progressRecord(forEpisodeId: episode.id)
+                                let isLastWatched = lastWatchedRecord?.id == "episode-\(episode.id)"
                                 Button {
                                     if let playable = catalogVM.apiClient?.buildPlayableEpisode(
                                         series: series,
@@ -87,26 +114,46 @@ struct SeriesDetailView: View {
                                         catalogVM.activePlayerItem = playable
                                     }
                                 } label: {
-                                    HStack(spacing: 12) {
-                                        Image(systemName: "play.circle.fill")
-                                            .font(.title2)
-                                            .foregroundStyle(.white)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text("Episode \(episode.displayEpisodeNumber): \(episode.title)")
-                                                .font(.subheadline.weight(.semibold))
-                                                .foregroundStyle(.white)
-                                                .lineLimit(1)
-                                            if let epPlot = episode.info?.plot, !epPlot.isEmpty {
-                                                Text(epPlot)
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                                    .lineLimit(2)
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: "play.circle.fill")
+                                                .font(.title2)
+                                                .foregroundStyle(isLastWatched ? Color(red: 0.898, green: 0.035, blue: 0.078) : .white)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                HStack(spacing: 6) {
+                                                    Text("Episode \(episode.displayEpisodeNumber): \(episode.title)")
+                                                        .font(.subheadline.weight(.semibold))
+                                                        .foregroundStyle(.white)
+                                                        .lineLimit(1)
+                                                    if isLastWatched {
+                                                        Text(epProgress?.isCompleted == true ? "Watched" : "Continue")
+                                                            .font(.caption2.bold())
+                                                            .padding(.horizontal, 6)
+                                                            .padding(.vertical, 2)
+                                                            .background(Color(red: 0.898, green: 0.035, blue: 0.078).opacity(0.25), in: Capsule())
+                                                            .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
+                                                    }
+                                                }
+                                                if let epPlot = episode.info?.plot, !epPlot.isEmpty {
+                                                    Text(epPlot)
+                                                        .font(.caption)
+                                                        .foregroundStyle(.secondary)
+                                                        .lineLimit(2)
+                                                }
                                             }
+                                            Spacer()
                                         }
-                                        Spacer()
+
+                                        if let epProgress, !epProgress.isCompleted, epProgress.progressFraction > 0 {
+                                            ProgressView(value: epProgress.progressFraction)
+                                                .tint(Color(red: 0.898, green: 0.035, blue: 0.078))
+                                        }
                                     }
                                     .padding(12)
-                                    .background(Color.white.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+                                    .background(
+                                        isLastWatched ? Color(red: 0.898, green: 0.035, blue: 0.078).opacity(0.12) : Color.white.opacity(0.08),
+                                        in: RoundedRectangle(cornerRadius: 10)
+                                    )
                                 }
                             }
                         }
@@ -139,7 +186,11 @@ struct SeriesDetailView: View {
                 mapped[num] = eps.sorted { $0.episodeNum < $1.episodeNum }
             }
             self.seasons = mapped
-            self.selectedSeason = mapped.keys.sorted().first ?? 1
+            if let lastSeason = lastWatchedRecord?.item.seasonNumber, mapped[lastSeason] != nil {
+                self.selectedSeason = lastSeason
+            } else {
+                self.selectedSeason = mapped.keys.sorted().first ?? 1
+            }
         } catch {
             // Keep empty state gracefully
         }

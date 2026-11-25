@@ -130,9 +130,12 @@ struct ProfileSettingsView: View {
     @ObservedObject var sleepGuard: SleepGuardManager
     @ObservedObject var credentialsStore: CredentialsStore
     @ObservedObject var syncManager: CloudSyncManager
+    @ObservedObject private var openSubtitlesSettings = OpenSubtitlesSettings.shared
 
     @State private var showDeleteConfirm = false
     @State private var showAddAccountSheet = false
+    @State private var revealOpenSubtitlesKey = false
+    @State private var revealGeminiKey = false
 
     var body: some View {
         NavigationStack {
@@ -210,6 +213,74 @@ struct ProfileSettingsView: View {
                     Text("Cloud Sync (iPad / iPhone / Mac)")
                 } footer: {
                     Text("Paste your free Firebase Realtime Database URL once on each device to sync Continue Watching & My List automatically.")
+                }
+
+                Section {
+                    HStack(spacing: 10) {
+                        if revealOpenSubtitlesKey {
+                            TextField("OpenSubtitles API Key", text: $openSubtitlesSettings.apiKey)
+                                .autocorrectionDisabled()
+                                #if os(iOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                        } else {
+                            SecureField("OpenSubtitles API Key", text: $openSubtitlesSettings.apiKey)
+                                .autocorrectionDisabled()
+                                #if os(iOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                        }
+                        Button {
+                            revealOpenSubtitlesKey.toggle()
+                        } label: {
+                            Image(systemName: revealOpenSubtitlesKey ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    LabeledContent(
+                        "OpenSubtitles Status",
+                        value: openSubtitlesSettings.isConfigured ? "Configured ✓" : "Not Set"
+                    )
+
+                    Picker("Default Language", selection: $openSubtitlesSettings.preferredLanguage) {
+                        ForEach(SubtitleLanguage.allCases) { lang in
+                            Text("\(lang.flag) \(lang.displayName)").tag(lang)
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        if revealGeminiKey {
+                            TextField("Gemini API Key (for AI Translation)", text: $openSubtitlesSettings.geminiAPIKey)
+                                .autocorrectionDisabled()
+                                #if os(iOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                        } else {
+                            SecureField("Gemini API Key (for AI Translation)", text: $openSubtitlesSettings.geminiAPIKey)
+                                .autocorrectionDisabled()
+                                #if os(iOS)
+                                .textInputAutocapitalization(.never)
+                                #endif
+                        }
+                        Button {
+                            revealGeminiKey.toggle()
+                        } label: {
+                            Image(systemName: revealGeminiKey ? "eye.slash" : "eye")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    LabeledContent(
+                        "AI Translation",
+                        value: openSubtitlesSettings.isGeminiConfigured ? "Configured ✓" : "Optional"
+                    )
+                } header: {
+                    Text("Subtitles & AI Translation")
+                } footer: {
+                    Text("Add your OpenSubtitles API Key (opensubtitles.com → API Consumers) and optionally a free Gemini API Key (aistudio.google.com) to translate English subtitles into Arabic or Spanish with AI.")
                 }
 
                 Section("Netflix Sleep Guard") {
