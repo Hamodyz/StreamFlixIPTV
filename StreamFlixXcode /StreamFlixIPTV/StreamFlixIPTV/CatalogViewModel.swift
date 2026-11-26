@@ -168,6 +168,7 @@ public final class CatalogViewModel: ObservableObject {
 
     @Published public private(set) var trendingMovies: [VODMovie] = []
     @Published public private(set) var trendingSeries: [SeriesItem] = []
+    @Published public private(set) var trendingAnime: [SeriesItem] = []
     @Published public private(set) var forYouMovies: [VODMovie] = []
     @Published public private(set) var forYouSeries: [SeriesItem] = []
     @Published public private(set) var forYouTitle: String = "Recommended for You ✨"
@@ -205,28 +206,6 @@ public final class CatalogViewModel: ObservableObject {
         let favTitles = favoriteSeriesItems.map(\.name) + favoriteMovies.map(\.name)
         aiStatusMessage = nil
 
-        guard settings.isGeminiConfigured else {
-            // Fallback without Gemini key: rotate a fresh mix of recent + top-rated items
-            let recentMovies = movies.filter { !($0.streamIcon ?? "").isEmpty }
-                .sorted { (Double($0.added ?? "0") ?? 0) > (Double($1.added ?? "0") ?? 0) }
-                .prefix(80)
-                .shuffled()
-            if !recentMovies.isEmpty {
-                self.trendingMovies = Array(recentMovies.prefix(20))
-            }
-            let topSeriesPool = seriesList.filter { !($0.cover ?? "").isEmpty }
-                .sorted { (Double($0.rating ?? "0") ?? 0) > (Double($1.rating ?? "0") ?? 0) }
-                .prefix(80)
-                .shuffled()
-            if !topSeriesPool.isEmpty {
-                self.trendingSeries = Array(topSeriesPool.prefix(20))
-            }
-            if forceRefresh {
-                aiStatusMessage = "Trending rotated! Add your free Gemini API Key in Account → Subtitles & AI Translation for personalized AI Picks."
-            }
-            return
-        }
-
         isRefreshingAI = true
         defer { isRefreshingAI = false }
 
@@ -248,16 +227,21 @@ public final class CatalogViewModel: ObservableObject {
                 self.trendingSeries = topUpSeries(matchedTrendingSeries, from: self.trendingSeries, limit: 20)
             }
 
+            let matchedAnime = matchSeries(titles: ai.trendingAnime, limit: 20)
+            if !matchedAnime.isEmpty {
+                self.trendingAnime = matchedAnime
+            }
+
             self.forYouMovies = matchMovies(titles: ai.forYouMovies, limit: 20)
             self.forYouSeries = matchSeries(titles: ai.forYouSeries, limit: 20)
             if let reason = ai.forYouReason, !reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 self.forYouTitle = "\(reason) ✨"
             }
             if forceRefresh {
-                aiStatusMessage = "✨ AI updated: \(matchedTrendingMovies.count) trending movies, \(matchedTrendingSeries.count) series, \(forYouMovies.count + forYouSeries.count) picks for you."
+                aiStatusMessage = "✨ Updated: \(matchedTrendingMovies.count) IMDb movies, \(matchedTrendingSeries.count) series, \(matchedAnime.count) anime, \(forYouMovies.count + forYouSeries.count) picks for you."
             }
         } catch {
-            aiStatusMessage = "AI Picks error: \(error.localizedDescription)"
+            aiStatusMessage = "Picks error: \(error.localizedDescription)"
         }
     }
 

@@ -21,7 +21,7 @@ public enum SubtitleAITranslatorError: LocalizedError, Sendable {
 }
 
 public struct SubtitleAITranslator: Sendable {
-    private static let model = "gemini-3.8-flash"
+    private static let model = "gemini-3.5-flash-lite"
 
     public init() {}
 
@@ -191,17 +191,27 @@ public struct SubtitleAITranslator: Sendable {
 
         let body = GeminiGenerateRequest(
             contents: [.init(parts: [.init(text: prompt)])],
-            generationConfig: .init(temperature: 0.2, responseMimeType: "application/json")
+            generationConfig: .init(
+                temperature: 0.2,
+                responseMimeType: "application/json",
+                thinkingConfig: .init(thinkingLevel: "minimal")
+            )
         )
+
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForResource = 60
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(apiKey, forHTTPHeaderField: "x-goog-api-key")
         request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = 90
+        request.timeoutInterval = 60
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             let errMsg = (try? JSONDecoder().decode(GeminiErrorEnvelope.self, from: data))?.error.message
                 ?? "HTTP \(http.statusCode)"
@@ -251,9 +261,14 @@ private struct GeminiGenerateRequest: Encodable {
         let text: String
     }
 
+    struct ThinkingConfig: Encodable {
+        let thinkingLevel: String
+    }
+
     struct GenerationConfig: Encodable {
         let temperature: Double
         let responseMimeType: String
+        let thinkingConfig: ThinkingConfig
     }
 }
 

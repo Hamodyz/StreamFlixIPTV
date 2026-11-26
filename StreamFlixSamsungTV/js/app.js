@@ -5,7 +5,18 @@
         progress: "sf_tv_progress_v1",
         favMovies: "sf_tv_fav_movies_v1",
         favSeries: "sf_tv_fav_series_v1",
-        favChannels: "sf_tv_fav_channels_v1"
+        favChannels: "sf_tv_fav_channels_v1",
+        osKey: "sf_tv_os_key_v1",
+        geminiKey: "sf_tv_gemini_key_v1",
+        subLang: "sf_tv_sub_lang_v1",
+        curation: "sf_tv_curation_v2",
+        firebaseUrl: "sf_tv_firebase_url_v1"
+    };
+
+    const SUB_LANGS = {
+        en: { code: "en", label: "English", flag: "🇺🇸" },
+        ar: { code: "ar", label: "العربية", flag: "🇪🇬" },
+        es: { code: "es", label: "Español", flag: "🇪🇸" }
     };
 
     const state = {
@@ -16,12 +27,46 @@
         liveCats: [], live: [],
         vodCats: [], movies: [],
         serCats: [], series: [],
+        normLive: [], normMovies: [], normSeries: [],
         selectedCat: { movies: null, series: null, live: null },
         progress: JSON.parse(localStorage.getItem(KEYS.progress) || "{}"),
         favMovies: new Set(JSON.parse(localStorage.getItem(KEYS.favMovies) || "[]")),
         favSeries: new Set(JSON.parse(localStorage.getItem(KEYS.favSeries) || "[]")),
         favChannels: new Set(JSON.parse(localStorage.getItem(KEYS.favChannels) || "[]")),
-        player: { item: null, current: 0, total: 0, isPaused: false, usingAVPlay: false, timer: null, hudTimer: null, consecutiveAuto: 0, sleepInterval: null }
+        curation: {
+            trendingMovies: [],
+            trendingSeries: [],
+            trendingAnime: [],
+            forYouMovies: [],
+            forYouSeries: [],
+            forYouReason: "Top Picks for You ✨",
+            isLoading: false
+        },
+        subSettings: {
+            osKey: localStorage.getItem(KEYS.osKey) || "",
+            geminiKey: localStorage.getItem(KEYS.geminiKey) || "",
+            lang: localStorage.getItem(KEYS.subLang) || "en"
+        },
+        cloudSync: {
+            url: localStorage.getItem(KEYS.firebaseUrl) || "",
+            isSyncing: false,
+            status: "",
+            pushTimer: null
+        },
+        subCache: {},
+        player: {
+            item: null,
+            current: 0,
+            total: 0,
+            isPaused: false,
+            usingAVPlay: false,
+            timer: null,
+            hudTimer: null,
+            consecutiveAuto: 0,
+            sleepInterval: null,
+            subCues: [],
+            subActive: false
+        }
     };
 
     // Register Samsung TV Remote Keys
@@ -29,6 +74,14 @@
         ["MediaPlayPause", "MediaPlay", "MediaPause", "MediaFastForward", "MediaRewind", "ChannelUp", "ChannelDown"].forEach(k => {
             try { tizen.tvinputdevice.registerKey(k); } catch (e) {}
         });
+    }
+
+    function escapeHTML(str) {
+        return String(str || "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
     }
 
     function normalizeArabic(text) {
@@ -41,9 +94,11 @@
             .replace(/ة/g, "ه");
     }
 
-    function matches(title, query) {
-        const q = normalizeArabic(query);
-        return !q || normalizeArabic(title).includes(q);
+    function looseMatchKey(text) {
+        return normalizeArabic(text)
+            .replace(/[^a-z0-9\u0600-\u06ff]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
     }
 
     function formatTime(sec) {
@@ -61,6 +116,32 @@
         const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         return res.json();
+    }
+
+    function cleanMediaTitle(raw, kind) {
+        let text = String(raw || "");
+        if (kind === "episode") {
+            text = text.split(" • ")[0].split(" — ")[0];
+        }
+        const yearMatch = text.match(/\b(19\d{2}|20\d{2})\b/);
+        const year = yearMatch ? Number(yearMatch[1]) : null;
+        text = text
+            .replace(/^(?:EN|AR|TR|FR|ES|DE|IT|ANIME|VIP|4K|UHD|FHD|HD|SD|MULTI|SUB|DUB|NETFLIX|APPLE|HBO|DISNEY)\s*[-:|]+\s*/i, "")
+            .replace(/\[[^\]]*\]/g, " ")
+            .replace(/\((?:19\d{2}|20\d{2}|4K|HD|FHD|UHD|SD|EN|AR|TR|FR|ES|MULTI|DUB|SUB)\)/gi, " ")
+            .replace(/\b(?:4K|UHD|FHD|1080p|720p|480p|WEB-DL|WEBRip|BluRay|HDRip|DVDRip|x264|x265|HEVC|H\.264|H\.265)\b/gi, " ")
+            .replace(/\bS\d+\s*E\d+\b/gi, " ")
+            .replace(/[.|_]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        return { query: text || raw, year };
+    }
+
+    function bindTVInput(inp) {
+        if (!inp) return;
+        inp.classList.add("tv-focusable");
+        inp.readOnly = true;
+        inp.addEventListener("blur", () => { inp.readOnly = true; });
     }
 
     // MARK: - Login & Profiles
@@ -134,7 +215,321 @@
         state.movies = v.value || [];
         state.serCats = sc.value || [];
         state.series = s.value || [];
+
+        // Pre-normalize once for instant search & matching
+        state.normLive = state.live.map(x => ({ item: x, norm: normalizeArabic(x.name), loose: looseMatchKey(x.name) }));
+        state.normMovies = state.movies.map(x => ({ item: x, norm: normalizeArabic(x.name), loose: looseMatchKey(x.name) }));
+        state.normSeries = state.series.map(x => ({ item: x, norm: normalizeArabic(x.name), loose: looseMatchKey(x.name) }));
+
         renderTab();
+        loadLiveCuration(false);
+        cloudPullAndMerge();
+    }
+
+    // MARK: - Live IMDb/Cinemeta & AniList Trending + Personalized Picks (Free, Zero Key)
+    function matchCatalog(titles, normList, idField, imgField, limit) {
+        const seen = new Set();
+        const out = [];
+        for (const raw of titles || []) {
+            const q = normalizeArabic(raw);
+            const lq = looseMatchKey(raw);
+            if (q.length < 2) continue;
+            const hit = normList.find(x => x.norm === q || x.loose === lq)
+                || normList.find(x => (x.norm.includes(q) || x.loose.includes(lq)) && x.item[imgField]);
+            if (hit && !seen.has(hit.item[idField])) {
+                seen.add(hit.item[idField]);
+                out.push(hit.item);
+                if (out.length >= limit) break;
+            }
+        }
+        return out;
+    }
+
+    async function fetchCinemeta(type, catalog) {
+        try {
+            const res = await fetch(`https://v3-cinemeta.strem.io/catalog/${type}/${catalog}.json`);
+            if (!res.ok) return [];
+            const data = await res.json();
+            return (data.metas || []).map(m => (m.name || "").trim()).filter(Boolean);
+        } catch (e) { return []; }
+    }
+
+    async function fetchAniList(query, variables) {
+        try {
+            const res = await fetch("https://graphql.anilist.co", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "Accept": "application/json" },
+                body: JSON.stringify(variables ? { query, variables } : { query })
+            });
+            if (!res.ok) return null;
+            return res.json();
+        } catch (e) { return null; }
+    }
+
+    async function loadLiveCuration(force) {
+        if (!state.movies.length && !state.series.length) return;
+        const cachedRaw = !force ? localStorage.getItem(KEYS.curation) : null;
+        if (cachedRaw) {
+            try {
+                const cached = JSON.parse(cachedRaw);
+                if (Date.now() - (cached.fetchedAt || 0) < 6 * 3600 * 1000) {
+                    applyCurationTitles(cached);
+                    return;
+                }
+            } catch (e) {}
+        }
+
+        state.curation.isLoading = true;
+        if (state.tab === "home") renderTab();
+
+        const recentRec = Object.values(state.progress).sort((a, b) => b.updatedAt - a.updatedAt)[0];
+        const favSer = state.series.find(s => state.favSeries.has(s.series_id));
+        const anchorRaw = (recentRec && recentRec.item && recentRec.item.title) || (favSer && favSer.name) || "";
+        const anchorClean = anchorRaw ? cleanMediaTitle(anchorRaw, "episode").query : "";
+
+        const [topM, topS, ratedM, aniTrend, aniSim] = await Promise.all([
+            fetchCinemeta("movie", "top"),
+            fetchCinemeta("series", "top"),
+            fetchCinemeta("movie", "imdbRating"),
+            fetchAniList(`query { Page(page: 1, perPage: 25) { media(type: ANIME, sort: TRENDING_DESC, isAdult: false) { title { english romaji } } } }`),
+            anchorClean ? fetchAniList(`query ($search: String) { Media(search: $search, type: ANIME) { recommendations(sort: RATING_DESC, perPage: 20) { nodes { mediaRecommendation { title { english romaji } } } } } }`, { search: anchorClean }) : Promise.resolve(null)
+        ]);
+
+        const topAnime = ((aniTrend && aniTrend.data && aniTrend.data.Page && aniTrend.data.Page.media) || [])
+            .map(m => (m.title && (m.title.english || m.title.romaji)) || "").filter(Boolean);
+        const simAnime = ((aniSim && aniSim.data && aniSim.data.Media && aniSim.data.Media.recommendations && aniSim.data.Media.recommendations.nodes) || [])
+            .map(n => n.mediaRecommendation && n.mediaRecommendation.title && (n.mediaRecommendation.title.english || n.mediaRecommendation.title.romaji)).filter(Boolean);
+
+        const payload = {
+            trendingMovies: topM,
+            trendingSeries: topS,
+            trendingAnime: topAnime,
+            forYouMovies: (ratedM.length ? ratedM : topM).slice().sort(() => Math.random() - 0.5).slice(0, 18),
+            forYouSeries: simAnime.length ? simAnime : topS.slice().sort(() => Math.random() - 0.5).slice(0, 18),
+            forYouReason: (anchorClean && simAnime.length) ? `Similar to ${anchorClean} ✨` : "Top IMDb & Popular Picks ✨",
+            fetchedAt: Date.now()
+        };
+
+        if (topM.length || topS.length || topAnime.length) {
+            localStorage.setItem(KEYS.curation, JSON.stringify(payload));
+        }
+        state.curation.isLoading = false;
+        applyCurationTitles(payload);
+    }
+
+    function applyCurationTitles(payload) {
+        state.curation.trendingMovies = matchCatalog(payload.trendingMovies, state.normMovies, "stream_id", "stream_icon", 20);
+        state.curation.trendingSeries = matchCatalog(payload.trendingSeries, state.normSeries, "series_id", "cover", 20);
+        state.curation.trendingAnime = matchCatalog(payload.trendingAnime, state.normSeries, "series_id", "cover", 20);
+        state.curation.forYouMovies = matchCatalog(payload.forYouMovies, state.normMovies, "stream_id", "stream_icon", 18);
+        state.curation.forYouSeries = matchCatalog(payload.forYouSeries, state.normSeries, "series_id", "cover", 18);
+        state.curation.forYouReason = payload.forYouReason || "Top Picks for You ✨";
+        if (state.tab === "home" && !state.search.trim()) {
+            renderTab();
+        }
+    }
+
+    // MARK: - Progress Helpers (Series-Aware Continue Watching)
+    function seriesKeyForItem(item) {
+        if (!item || item.kind !== "episode") return item ? item.id : "";
+        if (item.seriesId) return `series-${item.seriesId}`;
+        const base = String(item.title || "").split(" • ")[0].trim().toLowerCase();
+        return base ? `series-name-${base}` : item.id;
+    }
+
+    function getContinueWatchingList() {
+        const sorted = Object.values(state.progress)
+            .filter(r => r.item && r.item.kind !== "live" && r.position >= 5 && r.duration > 0 && (r.position / r.duration) < 0.93)
+            .sort((a, b) => b.updatedAt - a.updatedAt);
+        const seen = new Set();
+        const unique = [];
+        for (const rec of sorted) {
+            const key = seriesKeyForItem(rec.item);
+            if (!seen.has(key)) {
+                seen.add(key);
+                unique.push(rec);
+            }
+        }
+        return unique;
+    }
+
+    function getLatestSeriesRecord(seriesId) {
+        return Object.values(state.progress)
+            .filter(r => r.item && r.item.kind === "episode" && String(r.item.seriesId) === String(seriesId))
+            .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null;
+    }
+
+    // MARK: - Cloud Sync (Firebase Realtime Database REST — Compatible with iPhone/iPad/Mac)
+    function getCloudEndpoint() {
+        const raw = (state.cloudSync.url || "").trim().replace(/\/+$/, "");
+        if (!/^https:\/\//i.test(raw) || !state.creds || !state.creds.username) return null;
+        const parts = String(state.creds.username).trim().split(/[.#$\[\]\/ ]+/).filter(Boolean);
+        const safeKey = parts.length ? parts.join("_") : "default_user";
+        return `${raw}/streamflix/${safeKey}.json`;
+    }
+
+    function toLocalProgressId(id) {
+        const s = String(id || "");
+        return s.startsWith("episode-") ? "ep-" + s.slice(8) : s;
+    }
+
+    function toRemoteProgressId(id) {
+        const s = String(id || "");
+        return s.startsWith("ep-") ? "episode-" + s.slice(3) : s;
+    }
+
+    function toLocalRecord(remoteRec) {
+        if (!remoteRec || !remoteRec.item) return null;
+        const localId = toLocalProgressId(remoteRec.id || remoteRec.item.id);
+        const it = remoteRec.item;
+        return {
+            item: {
+                id: localId,
+                title: it.title || "",
+                subtitle: it.subtitle || "",
+                artwork: it.artworkURL || it.artwork || "",
+                url: it.streamURL || it.url || "",
+                kind: it.kind || "movie",
+                seriesId: it.seriesId != null ? Number(it.seriesId) : undefined,
+                seasonNumber: it.seasonNumber != null ? Number(it.seasonNumber) : undefined,
+                episodeNumber: it.episodeNumber != null ? Number(it.episodeNumber) : undefined
+            },
+            position: Number(remoteRec.positionSeconds != null ? remoteRec.positionSeconds : (remoteRec.position || 0)),
+            duration: Number(remoteRec.durationSeconds != null ? remoteRec.durationSeconds : (remoteRec.duration || 0)),
+            updatedAt: typeof remoteRec.updatedAt === "number" ? remoteRec.updatedAt : (Date.parse(remoteRec.updatedAt) || 0)
+        };
+    }
+
+    function toRemoteRecord(localRec) {
+        if (!localRec || !localRec.item || !localRec.item.url) return null;
+        const remoteId = toRemoteProgressId(localRec.item.id);
+        const it = localRec.item;
+        const outItem = {
+            id: remoteId,
+            title: it.title || "",
+            subtitle: it.subtitle || null,
+            artworkURL: it.artwork || null,
+            streamURL: it.url || "",
+            kind: it.kind || "movie"
+        };
+        if (it.seriesId != null) outItem.seriesId = Number(it.seriesId);
+        if (it.seasonNumber != null) outItem.seasonNumber = Number(it.seasonNumber);
+        if (it.episodeNumber != null) outItem.episodeNumber = Number(it.episodeNumber);
+        return {
+            id: remoteId,
+            item: outItem,
+            positionSeconds: Number(localRec.position || 0),
+            durationSeconds: Number(localRec.duration || 0),
+            updatedAt: new Date(localRec.updatedAt || Date.now()).toISOString()
+        };
+    }
+
+    function mergeRemoteProgress(remoteMap) {
+        let changed = false;
+        for (const key of Object.keys(remoteMap || {})) {
+            const rec = toLocalRecord(remoteMap[key]);
+            if (!rec || !rec.item || !rec.duration) continue;
+            const localId = rec.item.id;
+            const local = state.progress[localId];
+            const isDone = rec.duration > 0 && (rec.position / rec.duration) >= 0.93;
+            if (local) {
+                if (rec.updatedAt > (local.updatedAt || 0)) {
+                    state.progress[localId] = rec;
+                    changed = true;
+                }
+            } else if (!isDone || rec.item.kind === "episode") {
+                state.progress[localId] = rec;
+                changed = true;
+            }
+        }
+        const newestBySeries = {};
+        for (const rec of Object.values(state.progress)) {
+            if (!rec.item || rec.item.kind !== "episode") continue;
+            const sk = seriesKeyForItem(rec.item);
+            if (!newestBySeries[sk] || rec.updatedAt > newestBySeries[sk].updatedAt) {
+                newestBySeries[sk] = rec;
+            }
+        }
+        const keepIds = new Set(Object.values(newestBySeries).map(r => r.item.id));
+        for (const id of Object.keys(state.progress)) {
+            const rec = state.progress[id];
+            if (rec && rec.item && rec.item.kind === "episode" && !keepIds.has(id)) {
+                delete state.progress[id];
+                changed = true;
+            }
+        }
+        if (changed) localStorage.setItem(KEYS.progress, JSON.stringify(state.progress));
+        return changed;
+    }
+
+    async function cloudPullAndMerge() {
+        const url = getCloudEndpoint();
+        if (!url) return false;
+        state.cloudSync.isSyncing = true;
+        state.cloudSync.status = "Syncing...";
+        try {
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const text = (await res.text()).trim();
+            if (!text || text === "null") {
+                await cloudPushNow();
+                state.cloudSync.status = "Synced ✓";
+                return true;
+            }
+            const remote = JSON.parse(text);
+            const progChanged = mergeRemoteProgress(remote.watchProgress || {});
+            let favChanged = false;
+            (remote.favoriteSeriesIds || []).forEach(id => { const n = Number(id); if (!state.favSeries.has(n)) { state.favSeries.add(n); favChanged = true; } });
+            (remote.favoriteMovieIds || []).forEach(id => { const n = Number(id); if (!state.favMovies.has(n)) { state.favMovies.add(n); favChanged = true; } });
+            (remote.favoriteChannelIds || []).forEach(id => { const n = Number(id); if (!state.favChannels.has(n)) { state.favChannels.add(n); favChanged = true; } });
+            if (favChanged) {
+                localStorage.setItem(KEYS.favSeries, JSON.stringify([...state.favSeries]));
+                localStorage.setItem(KEYS.favMovies, JSON.stringify([...state.favMovies]));
+                localStorage.setItem(KEYS.favChannels, JSON.stringify([...state.favChannels]));
+            }
+            state.cloudSync.status = "Synced ✓";
+            if ((progChanged || favChanged) && state.tab === "home" && !state.search.trim()) renderTab();
+            return true;
+        } catch (e) {
+            state.cloudSync.status = "Sync error: " + e.message;
+            return false;
+        } finally {
+            state.cloudSync.isSyncing = false;
+        }
+    }
+
+    async function cloudPushNow() {
+        const url = getCloudEndpoint();
+        if (!url) return;
+        const remoteProgress = {};
+        for (const rec of Object.values(state.progress)) {
+            const r = toRemoteRecord(rec);
+            if (r) remoteProgress[r.id] = r;
+        }
+        const payload = {
+            watchProgress: remoteProgress,
+            favoriteSeriesIds: [...state.favSeries].map(Number).sort((a, b) => a - b),
+            favoriteMovieIds: [...state.favMovies].map(Number).sort((a, b) => a - b),
+            favoriteChannelIds: [...state.favChannels].map(Number).sort((a, b) => a - b),
+            updatedAt: new Date().toISOString()
+        };
+        try {
+            const res = await fetch(url, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            state.cloudSync.status = "Synced ✓";
+        } catch (e) {
+            state.cloudSync.status = "Sync error: " + e.message;
+        }
+    }
+
+    function scheduleCloudPush() {
+        if (!getCloudEndpoint()) return;
+        clearTimeout(state.cloudSync.pushTimer);
+        state.cloudSync.pushTimer = setTimeout(() => cloudPushNow(), 1500);
     }
 
     // MARK: - Rendering Tabs
@@ -142,9 +537,9 @@
         const btn = document.createElement("button");
         btn.className = "poster-card tv-focusable";
         btn.onclick = onClick;
-        btn.innerHTML = `<img src="${img || ""}" loading="lazy" onerror="this.style.opacity=0.2">` +
+        btn.innerHTML = `<img src="${escapeHTML(img || "")}" loading="lazy" onerror="this.style.opacity=0.2">` +
             (progressFrac ? `<div class="progress-bar-mini"><div style="width:${Math.round(progressFrac * 100)}%"></div></div>` : "") +
-            `<div class="poster-title">${title}</div>`;
+            `<div class="poster-title" dir="auto">${escapeHTML(title)}</div>`;
         return btn;
     }
 
@@ -153,10 +548,10 @@
         area.innerHTML = "";
 
         if (state.search.trim()) {
-            const q = state.search.trim();
-            const fSeries = state.series.filter(x => matches(x.name, q)).slice(0, 35);
-            const fMovies = state.movies.filter(x => matches(x.name, q)).slice(0, 35);
-            const fLive = state.live.filter(x => matches(x.name, q)).slice(0, 25);
+            const q = normalizeArabic(state.search.trim());
+            const fSeries = state.normSeries.filter(x => x.norm.includes(q)).slice(0, 35).map(x => x.item);
+            const fMovies = state.normMovies.filter(x => x.norm.includes(q)).slice(0, 35).map(x => x.item);
+            const fLive = state.normLive.filter(x => x.norm.includes(q)).slice(0, 25).map(x => x.item);
             if (fSeries.length) {
                 area.insertAdjacentHTML("beforeend", `<div class="section-title">Series (${fSeries.length})</div>`);
                 const g = document.createElement("div"); g.className = "grid-view";
@@ -179,25 +574,47 @@
         }
 
         if (state.tab === "home") {
-            const hero = state.movies.find(m => m.stream_icon) || state.movies[0];
+            const hero = state.curation.trendingMovies[0] || state.movies.find(m => m.stream_icon) || state.movies[0];
             if (hero) {
                 const hb = document.createElement("div");
                 hb.className = "hero-banner";
-                hb.innerHTML = `<img class="hero-backdrop" src="${hero.stream_icon || ""}" onerror="this.style.display='none'"><div class="hero-overlay"><span class="hero-badge">FEATURED</span><h2>${hero.name}</h2></div><img class="hero-poster" src="${hero.stream_icon || ""}" onerror="this.style.display='none'">`;
+                hb.innerHTML = `<img class="hero-backdrop" src="${escapeHTML(hero.stream_icon || "")}" onerror="this.style.display='none'"><div class="hero-overlay"><span class="hero-badge">FEATURED</span><h2 dir="auto">${escapeHTML(hero.name)}</h2><div class="hero-actions"></div></div><img class="hero-poster" src="${escapeHTML(hero.stream_icon || "")}" onerror="this.style.display='none'">`;
+                const actions = hb.querySelector(".hero-actions");
+
                 const playBtn = document.createElement("button");
                 playBtn.className = "btn-primary tv-focusable";
                 playBtn.textContent = "▶ Play";
                 playBtn.onclick = () => playMovie(hero);
-                hb.querySelector(".hero-overlay").appendChild(playBtn);
+
+                const refreshBtn = document.createElement("button");
+                refreshBtn.className = "btn-secondary tv-focusable";
+                refreshBtn.textContent = state.curation.isLoading ? "⏳ Loading Picks..." : "✨ Refresh Top Picks";
+                refreshBtn.onclick = () => loadLiveCuration(true);
+
+                actions.append(playBtn, refreshBtn);
                 area.appendChild(hb);
             }
 
-            // Continue Watching
-            const cw = Object.values(state.progress).filter(r => r.position >= 5 && r.duration > 0 && (r.position / r.duration) < 0.93).sort((a, b) => b.updatedAt - a.updatedAt);
+            // Continue Watching (deduplicated per series)
+            const cw = getContinueWatchingList();
             if (cw.length) {
                 area.insertAdjacentHTML("beforeend", `<div class="section-title">Continue Watching</div>`);
                 const row = document.createElement("div"); row.className = "carousel-row";
                 cw.forEach(r => row.appendChild(posterCard(r.item.title, r.item.artwork, r.position / r.duration, () => startPlayback(r.item))));
+                area.appendChild(row);
+            }
+
+            // Personalized Recommendations (Movies & Series)
+            if (state.curation.forYouMovies.length) {
+                area.insertAdjacentHTML("beforeend", `<div class="section-title">${state.curation.forYouReason}</div>`);
+                const row = document.createElement("div"); row.className = "carousel-row";
+                state.curation.forYouMovies.forEach(m => row.appendChild(posterCard(m.name, m.stream_icon, 0, () => playMovie(m))));
+                area.appendChild(row);
+            }
+            if (state.curation.forYouSeries.length) {
+                area.insertAdjacentHTML("beforeend", `<div class="section-title">Series Picks for You ✨</div>`);
+                const row = document.createElement("div"); row.className = "carousel-row";
+                state.curation.forYouSeries.forEach(s => row.appendChild(posterCard(s.name, s.cover, 0, () => openSeriesModal(s))));
                 area.appendChild(row);
             }
 
@@ -210,12 +627,38 @@
                 area.appendChild(row);
             }
 
+            // Favorite Movies
+            const favMov = state.movies.filter(m => state.favMovies.has(m.stream_id));
+            if (favMov.length) {
+                area.insertAdjacentHTML("beforeend", `<div class="section-title">My List — Movies ❤️</div>`);
+                const row = document.createElement("div"); row.className = "carousel-row";
+                favMov.forEach(m => row.appendChild(posterCard(m.name, m.stream_icon, 0, () => playMovie(m))));
+                area.appendChild(row);
+            }
+
             // Trending Movies
-            const trending = state.movies.filter(m => m.stream_icon).slice(0, 20);
-            if (trending.length) {
+            const trendingM = state.curation.trendingMovies.length ? state.curation.trendingMovies : state.movies.filter(m => m.stream_icon).slice(0, 20);
+            if (trendingM.length) {
                 area.insertAdjacentHTML("beforeend", `<div class="section-title">Trending Movies 🔥</div>`);
                 const row = document.createElement("div"); row.className = "carousel-row";
-                trending.forEach(m => row.appendChild(posterCard(m.name, m.stream_icon, 0, () => playMovie(m))));
+                trendingM.forEach(m => row.appendChild(posterCard(m.name, m.stream_icon, 0, () => playMovie(m))));
+                area.appendChild(row);
+            }
+
+            // Trending Series
+            const trendingS = state.curation.trendingSeries.length ? state.curation.trendingSeries : state.series.filter(s => s.cover).slice(0, 20);
+            if (trendingS.length) {
+                area.insertAdjacentHTML("beforeend", `<div class="section-title">Trending Series ⭐</div>`);
+                const row = document.createElement("div"); row.className = "carousel-row";
+                trendingS.forEach(s => row.appendChild(posterCard(s.name, s.cover, 0, () => openSeriesModal(s))));
+                area.appendChild(row);
+            }
+
+            // Trending Anime
+            if (state.curation.trendingAnime.length) {
+                area.insertAdjacentHTML("beforeend", `<div class="section-title">Trending Anime 🎌</div>`);
+                const row = document.createElement("div"); row.className = "carousel-row";
+                state.curation.trendingAnime.forEach(s => row.appendChild(posterCard(s.name, s.cover, 0, () => openSeriesModal(s))));
                 area.appendChild(row);
             }
         } else if (state.tab === "movies") {
@@ -241,10 +684,83 @@
             });
         } else if (state.tab === "account") {
             const ui = (state.authInfo && state.authInfo.user_info) || {};
-            area.innerHTML = `<div class="section-title">Account</div>
-                <p style="font-size:22px; margin-bottom:12px;">Profile: <strong>${state.creds.profileName}</strong></p>
-                <p style="font-size:22px; margin-bottom:12px;">Server: ${state.creds.host}</p>
-                <p style="font-size:22px; margin-bottom:24px;">Connections: ${ui.active_cons || 0} / ${ui.max_connections || 1}</p>`;
+            const box = document.createElement("div");
+            box.className = "account-box";
+            box.innerHTML = `<div class="section-title">Account &amp; Subtitles</div>
+                <p style="font-size:22px;">Profile: <strong>${state.creds.profileName}</strong> • Server: ${state.creds.host}</p>
+                <p style="font-size:20px; color:#aaa; margin-bottom:10px;">Connections: ${ui.active_cons || 0} / ${ui.max_connections || 1}</p>`;
+
+            const osInput = document.createElement("input");
+            osInput.className = "account-input";
+            osInput.type = "password";
+            osInput.placeholder = "OpenSubtitles API Key (opensubtitles.com → API Consumers)";
+            osInput.value = state.subSettings.osKey;
+            osInput.oninput = e => {
+                state.subSettings.osKey = e.target.value.trim();
+                localStorage.setItem(KEYS.osKey, state.subSettings.osKey);
+            };
+            bindTVInput(osInput);
+
+            const gemInput = document.createElement("input");
+            gemInput.className = "account-input";
+            gemInput.type = "password";
+            gemInput.placeholder = "Gemini API Key (Optional — for AI Subtitle Translation)";
+            gemInput.value = state.subSettings.geminiKey;
+            gemInput.oninput = e => {
+                state.subSettings.geminiKey = e.target.value.trim();
+                localStorage.setItem(KEYS.geminiKey, state.subSettings.geminiKey);
+            };
+            bindTVInput(gemInput);
+
+            const langBtn = document.createElement("button");
+            langBtn.className = "btn-secondary tv-focusable";
+            const updateLangBtn = () => {
+                const l = SUB_LANGS[state.subSettings.lang] || SUB_LANGS.en;
+                langBtn.textContent = `Default Subtitle Language: ${l.flag} ${l.label} (Press OK to switch)`;
+            };
+            updateLangBtn();
+            langBtn.onclick = () => {
+                const order = ["en", "ar", "es"];
+                const next = order[(order.indexOf(state.subSettings.lang) + 1) % order.length];
+                state.subSettings.lang = next;
+                localStorage.setItem(KEYS.subLang, next);
+                updateLangBtn();
+            };
+
+            const fbInput = document.createElement("input");
+            fbInput.className = "account-input";
+            fbInput.type = "text";
+            fbInput.placeholder = "Firebase Realtime Database URL (https://...)";
+            fbInput.value = state.cloudSync.url;
+            fbInput.oninput = e => {
+                state.cloudSync.url = e.target.value.trim();
+                localStorage.setItem(KEYS.firebaseUrl, state.cloudSync.url);
+            };
+            bindTVInput(fbInput);
+
+            const syncBtn = document.createElement("button");
+            syncBtn.className = "btn-secondary tv-focusable";
+            const updateSyncLabel = () => {
+                syncBtn.textContent = state.cloudSync.status
+                    ? `☁️ Cloud Sync (${state.cloudSync.status}) — Press OK to Sync Now`
+                    : "☁️ Sync Now (iPhone / iPad / TV)";
+            };
+            updateSyncLabel();
+            syncBtn.onclick = async () => {
+                syncBtn.textContent = "⏳ Syncing...";
+                await cloudPullAndMerge();
+                await cloudPushNow();
+                updateSyncLabel();
+            };
+
+            const refreshLibBtn = document.createElement("button");
+            refreshLibBtn.className = "btn-secondary tv-focusable";
+            refreshLibBtn.textContent = "🔄 Refresh Library & Top Picks";
+            refreshLibBtn.onclick = async () => {
+                localStorage.removeItem(KEYS.curation);
+                await loadCatalog();
+            };
+
             const outBtn = document.createElement("button");
             outBtn.className = "btn-primary tv-focusable";
             outBtn.textContent = "Sign Out";
@@ -253,7 +769,9 @@
                 document.getElementById("login-screen").classList.add("active");
                 renderSavedProfiles();
             };
-            area.appendChild(outBtn);
+
+            box.append(osInput, gemInput, langBtn, fbInput, syncBtn, refreshLibBtn, outBtn);
+            area.appendChild(box);
         }
     }
 
@@ -309,7 +827,7 @@
             const num = idx + 1;
             const btn = document.createElement("button");
             btn.className = "live-dish-row tv-focusable";
-            btn.innerHTML = `<span class="live-num">${String(num).padStart(3, "0")}</span><img src="${ch.stream_icon || ""}" style="width:44px;height:32px;object-fit:contain;flex-shrink:0;" onerror="this.style.opacity=0.2"><span class="live-name">${ch.name}</span>`;
+            btn.innerHTML = `<span class="live-num">${String(num).padStart(3, "0")}</span><img src="${escapeHTML(ch.stream_icon || "")}" style="width:44px;height:32px;object-fit:contain;flex-shrink:0;" onerror="this.style.opacity=0.2"><span class="live-name" dir="auto">${escapeHTML(ch.name)}</span>`;
             btn.onfocus = () => updatePreview(ch, num);
             btn.onclick = () => playChannel(ch, items);
             listPane.appendChild(btn);
@@ -327,12 +845,28 @@
         return btn;
     }
 
-    // MARK: - Series Modal
+    // MARK: - Series Modal (With Resume & Episode Progress)
     async function openSeriesModal(series) {
         const modal = document.getElementById("series-modal");
         modal.classList.remove("hidden");
         document.getElementById("series-modal-title").textContent = series.name;
         document.getElementById("series-modal-plot").textContent = series.plot || "";
+
+        const lastRec = getLatestSeriesRecord(series.series_id);
+        const resumeBtn = document.getElementById("btn-resume-series");
+        if (lastRec) {
+            const sNum = lastRec.item.seasonNumber || 1;
+            const eNum = lastRec.item.episodeNumber || 1;
+            const completed = lastRec.duration > 0 && (lastRec.position / lastRec.duration) >= 0.93;
+            resumeBtn.textContent = completed ? `▶ Last Watched S${sNum}:E${eNum}` : `▶ Resume S${sNum}:E${eNum}`;
+            resumeBtn.classList.remove("hidden");
+            resumeBtn.onclick = () => {
+                modal.classList.add("hidden");
+                startPlayback(lastRec.item);
+            };
+        } else {
+            resumeBtn.classList.add("hidden");
+        }
 
         const favBtn = document.getElementById("btn-fav-series");
         const updateFavBtn = () => favBtn.textContent = state.favSeries.has(series.series_id) ? "♥ In My List" : "♡ My List";
@@ -342,6 +876,7 @@
             else state.favSeries.add(series.series_id);
             localStorage.setItem(KEYS.favSeries, JSON.stringify([...state.favSeries]));
             updateFavBtn();
+            scheduleCloudPush();
         };
         document.getElementById("btn-close-series").onclick = () => modal.classList.add("hidden");
 
@@ -359,8 +894,13 @@
                 epBox.innerHTML = "";
                 eps.forEach((ep, i) => {
                     const row = document.createElement("button");
-                    row.className = "channel-row tv-focusable";
-                    row.innerHTML = `<span>▶ S${sKey}:E${ep.episode_num} — ${ep.title}</span>`;
+                    const epProg = state.progress[`ep-${ep.id}`];
+                    const isLast = lastRec && lastRec.item && lastRec.item.id === `ep-${ep.id}`;
+                    const isDone = epProg && epProg.duration > 0 && (epProg.position / epProg.duration) >= 0.93;
+                    const epTitle = ep.title || `Episode ${ep.episode_num}`;
+                    row.className = "channel-row tv-focusable" + (isLast ? " active-cat" : "");
+                    const badgeHTML = isLast ? `<span class="ep-badge">${isDone ? "Watched" : "Continue"}</span>` : "";
+                    row.innerHTML = `<span dir="auto">▶ S${sKey}:E${ep.episode_num} — ${escapeHTML(epTitle)}</span>${badgeHTML}`;
                     row.onclick = () => {
                         modal.classList.add("hidden");
                         const ext = ep.container_extension || "mp4";
@@ -370,7 +910,10 @@
                             subtitle: eps[i + 1].title,
                             artwork: series.cover,
                             kind: "episode",
-                            url: `${state.creds.host}/series/${state.creds.username}/${state.creds.password}/${eps[i + 1].id}.${eps[i + 1].container_extension || "mp4"}`
+                            seriesId: series.series_id,
+                            seasonNumber: Number(sKey),
+                            episodeNumber: eps[i + 1].episode_num,
+                            url: `${state.creds.host}/series/${encodeURIComponent(state.creds.username)}/${encodeURIComponent(state.creds.password)}/${eps[i + 1].id}.${eps[i + 1].container_extension || "mp4"}`
                         } : null;
                         startPlayback({
                             id: `ep-${ep.id}`,
@@ -378,7 +921,10 @@
                             subtitle: ep.title,
                             artwork: series.cover,
                             kind: "episode",
-                            url: `${state.creds.host}/series/${state.creds.username}/${state.creds.password}/${ep.id}.${ext}`,
+                            seriesId: series.series_id,
+                            seasonNumber: Number(sKey),
+                            episodeNumber: ep.episode_num,
+                            url: `${state.creds.host}/series/${encodeURIComponent(state.creds.username)}/${encodeURIComponent(state.creds.password)}/${ep.id}.${ext}`,
                             nextItem: nextEp
                         });
                     };
@@ -393,11 +939,260 @@
                 b.onclick = () => showSeason(sKey);
                 sTabs.appendChild(b);
             });
-            if (seasons.length) showSeason(seasons[0]);
+            const initialSeason = (lastRec && lastRec.item && lastRec.item.seasonNumber && seasons.includes(String(lastRec.item.seasonNumber)))
+                ? String(lastRec.item.seasonNumber)
+                : seasons[0];
+            if (initialSeason) showSeason(initialSeason);
             focusFirstInScope();
         } catch (e) {
             epBox.innerHTML = "<p>Could not load episodes.</p>";
         }
+    }
+
+    // MARK: - OpenSubtitles API + Gemini AI Translation + SRT Overlay
+    function parseSRTTime(str) {
+        const m = String(str || "").trim().match(/(\d+):(\d+):(\d+)[,.](\d+)/);
+        if (!m) return 0;
+        return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 1000;
+    }
+
+    function parseSRT(raw) {
+        const blocks = String(raw || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim().split(/\n\n+/);
+        const cues = [];
+        for (const block of blocks) {
+            const lines = block.split("\n");
+            const timingIdx = lines.findIndex(l => l.includes("-->"));
+            if (timingIdx === -1) continue;
+            const parts = lines[timingIdx].split("-->");
+            if (parts.length < 2) continue;
+            const start = parseSRTTime(parts[0]);
+            const end = parseSRTTime(parts[1].split(" ")[0]);
+            const text = lines.slice(timingIdx + 1).join("\n").replace(/<[^>]+>/g, "").trim();
+            if (text && end > start) cues.push({ start, end, text });
+        }
+        return cues;
+    }
+
+    function updateSubtitleOverlay(sec) {
+        const el = document.getElementById("subtitle-overlay");
+        if (!state.player.subActive || !state.player.subCues.length) {
+            el.classList.add("hidden");
+            return;
+        }
+        const cue = state.player.subCues.find(c => sec >= c.start && sec <= c.end);
+        if (cue) {
+            el.textContent = cue.text;
+            el.classList.remove("hidden");
+        } else {
+            el.classList.add("hidden");
+        }
+    }
+
+    async function searchOpenSubtitles(query, lang, item) {
+        const apiKey = state.subSettings.osKey;
+        if (!apiKey) throw new Error("Add your OpenSubtitles API Key in Account → Subtitles.");
+
+        async function runQuery(useSeason, useEpisode, useType) {
+            const params = new URLSearchParams();
+            if (useEpisode && item.episodeNumber) params.set("episode_number", String(item.episodeNumber));
+            params.set("languages", lang);
+            params.set("query", query.toLowerCase().trim());
+            if (useSeason && item.seasonNumber) params.set("season_number", String(item.seasonNumber));
+            if (useType) params.set("type", item.kind === "episode" ? "episode" : "movie");
+            const res = await fetch(`https://api.opensubtitles.com/api/v1/subtitles?${params.toString()}`, {
+                headers: { "Api-Key": apiKey, "User-Agent": "StreamFlixTV v1.0", "Accept": "application/json" }
+            });
+            if (res.status === 401 || res.status === 403) throw new Error("Invalid OpenSubtitles API Key.");
+            if (!res.ok) throw new Error(`OpenSubtitles HTTP ${res.status}`);
+            const json = await res.json();
+            return (json.data || []).map(e => {
+                const f = e.attributes && e.attributes.files && e.attributes.files[0];
+                if (!f) return null;
+                return {
+                    fileId: f.file_id,
+                    release: e.attributes.release || f.file_name || "Subtitle",
+                    downloads: e.attributes.download_count || 0,
+                    trusted: Boolean(e.attributes.from_trusted)
+                };
+            }).filter(Boolean).sort((a, b) => (b.trusted - a.trusted) || (b.downloads - a.downloads));
+        }
+
+        let res = await runQuery(true, true, true);
+        if (!res.length && item.kind === "episode") res = await runQuery(false, true, true);
+        if (!res.length) res = await runQuery(false, false, false);
+        return res;
+    }
+
+    async function downloadOpenSubtitleText(fileId) {
+        if (state.subCache[`raw_${fileId}`]) return state.subCache[`raw_${fileId}`];
+        const apiKey = state.subSettings.osKey;
+        const res = await fetch("https://api.opensubtitles.com/api/v1/download", {
+            method: "POST",
+            headers: {
+                "Api-Key": apiKey,
+                "User-Agent": "StreamFlixTV v1.0",
+                "Accept": "application/json",
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ file_id: fileId, sub_format: "srt" })
+        });
+        if (!res.ok) throw new Error(`Download HTTP ${res.status}`);
+        const json = await res.json();
+        if (!json.link) throw new Error("No subtitle link returned.");
+        const srtRes = await fetch(json.link);
+        const text = await srtRes.text();
+        state.subCache[`raw_${fileId}`] = text;
+        return text;
+    }
+
+    async function translateSRTWithGemini(cues, targetLangCode, statusEl) {
+        const key = state.subSettings.geminiKey;
+        if (!key) throw new Error("Add your Gemini API Key in Account → Subtitles.");
+        const langName = targetLangCode === "ar" ? "natural fluent Arabic" : "natural fluent Spanish";
+        const batchSize = 45;
+        const out = cues.slice();
+        const totalBatches = Math.ceil(cues.length / batchSize);
+
+        for (let b = 0; b < totalBatches; b++) {
+            statusEl.textContent = `✨ Translating with AI (${Math.round(((b + 1) / totalBatches) * 100)}%)...`;
+            const slice = cues.slice(b * batchSize, (b + 1) * batchSize);
+            const lines = slice.map(c => c.text);
+            const prompt = `Translate this JSON array of ${lines.length} subtitle lines into ${langName}. Return ONLY a valid JSON array of ${lines.length} strings in the exact same order.\n${JSON.stringify(lines)}`;
+            const res = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { temperature: 0.2, responseMimeType: "application/json", thinkingConfig: { thinkingLevel: "minimal" } }
+                })
+            });
+            if (!res.ok) throw new Error(`Gemini HTTP ${res.status}`);
+            const data = await res.json();
+            const raw = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0] && data.candidates[0].content.parts[0].text) || "[]";
+            const translated = JSON.parse(raw.replace(/```json|```/g, "").trim());
+            for (let i = 0; i < slice.length; i++) {
+                if (translated[i]) out[b * batchSize + i] = { ...slice[i], text: translated[i] };
+            }
+        }
+        return out;
+    }
+
+    function openSubtitleModal() {
+        const item = state.player.item;
+        if (!item || item.kind === "live") return;
+        const modal = document.getElementById("subtitle-modal");
+        modal.classList.remove("hidden");
+
+        const statusEl = document.getElementById("sub-modal-status");
+        const listEl = document.getElementById("sub-results-list");
+        const qInp = document.getElementById("inp-sub-query");
+        const aiBtn = document.getElementById("btn-sub-ai-translate");
+        qInp.value = cleanMediaTitle(item.title, item.kind).query;
+
+        const refreshLangButtons = () => {
+            ["en", "ar", "es"].forEach(code => {
+                document.getElementById(`btn-sub-lang-${code}`).classList.toggle("active", state.subSettings.lang === code);
+            });
+            const showAI = state.subSettings.lang !== "en" && Boolean(state.subSettings.geminiKey) && Boolean(state.subSettings.osKey);
+            aiBtn.classList.toggle("hidden", !showAI);
+            if (showAI) {
+                aiBtn.textContent = `✨ Translate English Subtitle with AI → ${SUB_LANGS[state.subSettings.lang].label}`;
+            }
+        };
+
+        const runSubSearch = async () => {
+            refreshLangButtons();
+            if (!state.subSettings.osKey) {
+                statusEl.textContent = "Add your OpenSubtitles API Key in Account → Subtitles first.";
+                listEl.innerHTML = "";
+                return;
+            }
+            statusEl.textContent = `Searching ${SUB_LANGS[state.subSettings.lang].label} subtitles...`;
+            listEl.innerHTML = "";
+            try {
+                const results = await searchOpenSubtitles(qInp.value, state.subSettings.lang, item);
+                statusEl.textContent = results.length ? `Found ${results.length} subtitles` : "No subtitles found. Try editing the title or use AI Translation.";
+                results.slice(0, 25).forEach(sub => {
+                    const row = document.createElement("button");
+                    row.className = "channel-row tv-focusable";
+                    row.innerHTML = `<span>${sub.trusted ? "✓ " : ""}${sub.release}</span><span class="ep-badge">⬇ ${sub.downloads}</span>`;
+                    row.onclick = async () => {
+                        statusEl.textContent = "Downloading subtitle...";
+                        try {
+                            const raw = await downloadOpenSubtitleText(sub.fileId);
+                            state.player.subCues = parseSRT(raw);
+                            state.player.subActive = true;
+                            updateSubtitleOverlay(state.player.current);
+                            modal.classList.add("hidden");
+                            showToast(`${SUB_LANGS[state.subSettings.lang].flag} Subtitles Loaded`);
+                            focusFirstInScope();
+                        } catch (e) { statusEl.textContent = e.message; }
+                    };
+                    listEl.appendChild(row);
+                });
+            } catch (e) {
+                statusEl.textContent = e.message;
+            }
+        };
+
+        ["en", "ar", "es"].forEach(code => {
+            document.getElementById(`btn-sub-lang-${code}`).onclick = () => {
+                state.subSettings.lang = code;
+                localStorage.setItem(KEYS.subLang, code);
+                runSubSearch();
+            };
+        });
+
+        document.getElementById("btn-sub-search").onclick = runSubSearch;
+        document.getElementById("btn-sub-off").onclick = () => {
+            state.player.subActive = false;
+            state.player.subCues = [];
+            updateSubtitleOverlay(0);
+            modal.classList.add("hidden");
+            showToast("Subtitles Off");
+            focusFirstInScope();
+        };
+        document.getElementById("btn-close-sub").onclick = () => {
+            modal.classList.add("hidden");
+            focusFirstInScope();
+        };
+
+        aiBtn.onclick = async () => {
+            try {
+                statusEl.textContent = "Finding best English subtitle...";
+                const enRes = await searchOpenSubtitles(qInp.value, "en", item);
+                if (!enRes.length) { statusEl.textContent = "No English subtitle found to translate."; return; }
+                const best = enRes[0];
+                const cacheKey = `ai_${best.fileId}_${state.subSettings.lang}`;
+                if (state.subCache[cacheKey]) {
+                    state.player.subCues = state.subCache[cacheKey];
+                } else {
+                    const raw = await downloadOpenSubtitleText(best.fileId);
+                    const enCues = parseSRT(raw);
+                    const translated = await translateSRTWithGemini(enCues, state.subSettings.lang, statusEl);
+                    state.subCache[cacheKey] = translated;
+                    state.player.subCues = translated;
+                }
+                state.player.subActive = true;
+                updateSubtitleOverlay(state.player.current);
+                modal.classList.add("hidden");
+                showToast(`✨ ${SUB_LANGS[state.subSettings.lang].flag} AI Subtitles Loaded`);
+                focusFirstInScope();
+            } catch (e) {
+                statusEl.textContent = e.message;
+            }
+        };
+
+        runSubSearch();
+        focusFirstInScope();
+    }
+
+    function showToast(msg) {
+        const toast = document.getElementById("player-toast");
+        toast.textContent = msg;
+        toast.classList.remove("hidden");
+        clearTimeout(state.player.toastTimer);
+        state.player.toastTimer = setTimeout(() => toast.classList.add("hidden"), 1100);
     }
 
     // MARK: - Playback (Samsung AVPlay + Browser HTML5 Fallback)
@@ -409,7 +1204,7 @@
             subtitle: m.rating ? `★ ${m.rating}` : "",
             artwork: m.stream_icon,
             kind: "movie",
-            url: `${state.creds.host}/movie/${state.creds.username}/${state.creds.password}/${m.stream_id}.${ext}`
+            url: `${state.creds.host}/movie/${encodeURIComponent(state.creds.username)}/${encodeURIComponent(state.creds.password)}/${m.stream_id}.${ext}`
         });
     }
 
@@ -423,8 +1218,8 @@
             subtitle: "LIVE TV",
             artwork: ch.stream_icon,
             kind: "live",
-            url: `${state.creds.host}/live/${state.creds.username}/${state.creds.password}/${ch.stream_id}.ts`,
-            fallbackUrl: `${state.creds.host}/live/${state.creds.username}/${state.creds.password}/${ch.stream_id}.m3u8`
+            url: `${state.creds.host}/live/${encodeURIComponent(state.creds.username)}/${encodeURIComponent(state.creds.password)}/${ch.stream_id}.ts`,
+            fallbackUrl: `${state.creds.host}/live/${encodeURIComponent(state.creds.username)}/${encodeURIComponent(state.creds.password)}/${ch.stream_id}.m3u8`
         });
     }
     function showLiveBanner(ch, num) {
@@ -464,15 +1259,22 @@
         screen.classList.remove("hidden");
         state.player.item = item;
         state.player.isPaused = false;
+        state.player.subCues = [];
+        state.player.subActive = false;
+        updateSubtitleOverlay(0);
+
         const playUrl = (useFallback && item.fallbackUrl) ? item.fallbackUrl : item.url;
         document.getElementById("player-paused-badge").classList.add("hidden");
         document.getElementById("hud-title").textContent = item.title;
         document.getElementById("hud-subtitle").textContent = item.subtitle || "";
         document.getElementById("btn-ch-prev").classList.toggle("hidden", item.kind !== "live");
         document.getElementById("btn-ch-next").classList.toggle("hidden", item.kind !== "live");
+        document.getElementById("btn-subtitles").classList.toggle("hidden", item.kind === "live");
         document.getElementById("hud-progress-wrap").classList.toggle("hidden", item.kind === "live");
 
-        const saved = (item.kind !== "live" && state.progress[item.id]) ? Math.max(0, state.progress[item.id].position - 2) : 0;
+        const rec = state.progress[item.id];
+        const isCompleted = rec && rec.duration > 0 && (rec.position / rec.duration) >= 0.93;
+        const saved = (item.kind !== "live" && rec && !isCompleted) ? Math.max(0, rec.position - 2) : 0;
 
         if (window.webapis && webapis.avplay) {
             state.player.usingAVPlay = true;
@@ -486,6 +1288,7 @@
                         state.player.current = ms / 1000;
                         state.player.total = webapis.avplay.getDuration() / 1000;
                         updatePlayerHUD();
+                        updateSubtitleOverlay(state.player.current);
                     },
                     onerror: () => {
                         if (!useFallback && item.fallbackUrl) startPlayback(item, true);
@@ -511,6 +1314,7 @@
                 state.player.current = v.currentTime;
                 state.player.total = v.duration || 0;
                 updatePlayerHUD();
+                updateSubtitleOverlay(state.player.current);
             };
             v.onended = () => onStreamCompleted();
         }
@@ -523,8 +1327,12 @@
         document.getElementById("hud-tot-time").textContent = formatTime(total);
         document.getElementById("hud-progress-fill").style.width = total > 0 ? `${Math.min(100, (current / total) * 100)}%` : "0%";
         if (item && item.kind !== "live" && total > 0 && current > 2) {
+            const prev = state.progress[item.id];
             state.progress[item.id] = { item, position: current, duration: total, updatedAt: Date.now() };
             localStorage.setItem(KEYS.progress, JSON.stringify(state.progress));
+            if (!prev || Math.abs(current - prev.position) >= 15) {
+                scheduleCloudPush();
+            }
         }
     }
 
@@ -545,18 +1353,19 @@
         const target = Math.max(0, (state.player.current || 0) + delta);
         state.player.current = target;
         updatePlayerHUD();
+        updateSubtitleOverlay(target);
         if (state.player.usingAVPlay) webapis.avplay.seekTo(target * 1000);
         else document.getElementById("html5-player").currentTime = target;
-        const toast = document.getElementById("player-toast");
-        toast.textContent = delta > 0 ? `⏩ +${delta}s` : `⏪ ${delta}s`;
-        toast.classList.remove("hidden");
-        clearTimeout(state.player.toastTimer);
-        state.player.toastTimer = setTimeout(() => toast.classList.add("hidden"), 800);
+        showToast(delta > 0 ? `⏩ +${delta}s` : `⏪ ${delta}s`);
         revealHUD();
     }
 
     function stopPlayer() {
         updatePlayerHUD();
+        scheduleCloudPush();
+        state.player.subActive = false;
+        state.player.subCues = [];
+        updateSubtitleOverlay(0);
         if (state.player.usingAVPlay) {
             try { webapis.avplay.stop(); webapis.avplay.close(); } catch (e) {}
         } else {
@@ -645,6 +1454,7 @@
     };
     document.getElementById("btn-player-back").onclick = stopPlayer;
     document.getElementById("btn-play-pause").onclick = togglePlayPause;
+    document.getElementById("btn-subtitles").onclick = openSubtitleModal;
     document.getElementById("btn-skip-back").onclick = () => skipSeconds(-10);
     document.getElementById("btn-skip-fwd").onclick = () => skipSeconds(10);
     document.getElementById("btn-ch-prev").onclick = () => {
@@ -662,6 +1472,8 @@
     function getActiveScope() {
         const sleep = document.getElementById("sleep-modal");
         if (!sleep.classList.contains("hidden")) return sleep;
+        const subModal = document.getElementById("subtitle-modal");
+        if (!subModal.classList.contains("hidden")) return subModal;
         const drawer = document.getElementById("live-drawer");
         if (!drawer.classList.contains("hidden")) return drawer;
         const player = document.getElementById("player-screen");
@@ -763,6 +1575,7 @@
         const k = e.keyCode;
         const playerOpen = !document.getElementById("player-screen").classList.contains("hidden");
         const sleepOpen = !document.getElementById("sleep-modal").classList.contains("hidden");
+        const subOpen = !document.getElementById("subtitle-modal").classList.contains("hidden");
         const active = document.activeElement;
         const isInput = active && (active.tagName === "INPUT" || active.tagName === "SELECT");
 
@@ -777,6 +1590,9 @@
             }
             if (sleepOpen) {
                 document.getElementById("btn-sleep-exit").click();
+            } else if (subOpen) {
+                document.getElementById("subtitle-modal").classList.add("hidden");
+                focusFirstInScope();
             } else if (!document.getElementById("live-drawer").classList.contains("hidden")) {
                 closeLiveDrawer();
             } else if (playerOpen) {
@@ -807,7 +1623,7 @@
         }
 
         // Player-specific keys (Dish Mode for Live TV + Instant Seek for VOD)
-        if (playerOpen && !sleepOpen) {
+        if (playerOpen && !sleepOpen && !subOpen) {
             const drawerOpen = !document.getElementById("live-drawer").classList.contains("hidden");
             const hudHidden = document.getElementById("player-hud").classList.contains("hidden");
             const isLive = state.player.item && state.player.item.kind === "live";
@@ -870,10 +1686,7 @@
     });
 
     // Keep inputs readOnly while navigating so Samsung TV keyboard doesn't trap D-Pad arrows
-    document.querySelectorAll("input.tv-focusable").forEach(inp => {
-        inp.readOnly = true;
-        inp.addEventListener("blur", () => { inp.readOnly = true; });
-    });
+    document.querySelectorAll("input.tv-focusable").forEach(bindTVInput);
 
     renderSavedProfiles();
     focusFirstInScope();

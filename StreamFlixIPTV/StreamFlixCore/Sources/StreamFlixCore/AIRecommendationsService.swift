@@ -3,6 +3,7 @@ import Foundation
 public struct AIRecommendationTitles: Codable, Sendable {
     public let trendingMovies: [String]
     public let trendingSeries: [String]
+    public let trendingAnime: [String]
     public let forYouMovies: [String]
     public let forYouSeries: [String]
     public let forYouReason: String?
@@ -11,6 +12,7 @@ public struct AIRecommendationTitles: Codable, Sendable {
     public init(
         trendingMovies: [String],
         trendingSeries: [String],
+        trendingAnime: [String] = [],
         forYouMovies: [String],
         forYouSeries: [String],
         forYouReason: String?,
@@ -18,6 +20,7 @@ public struct AIRecommendationTitles: Codable, Sendable {
     ) {
         self.trendingMovies = trendingMovies
         self.trendingSeries = trendingSeries
+        self.trendingAnime = trendingAnime
         self.forYouMovies = forYouMovies
         self.forYouSeries = forYouSeries
         self.forYouReason = forYouReason
@@ -25,10 +28,11 @@ public struct AIRecommendationTitles: Codable, Sendable {
     }
 }
 
+/// Fast, free, zero-key live curation powered by IMDb/Cinemeta & AniList public catalogs,
+/// with optional AniList similarity recommendations based on what you watch.
 public struct AIRecommendationsService: Sendable {
-    private static let model = "gemini-3.8-flash"
-    private static let cacheKey = "StreamFlixIPTV.AICuratorCache.v1"
-    private static let cacheTTL: TimeInterval = 12 * 3600 // 12 hours
+    private static let cacheKey = "StreamFlixIPTV.LiveCuratorCache.v2"
+    private static let cacheTTL: TimeInterval = 6 * 3600 // 6 hours
 
     public init() {}
 
@@ -57,120 +61,190 @@ public struct AIRecommendationsService: Sendable {
             return cached
         }
 
-        let key = geminiAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else {
-            throw SubtitleAITranslatorError.missingGeminiKey
-        }
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 20
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
 
-        guard let url = URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(Self.model):generateContent") else {
-            throw SubtitleAITranslatorError.invalidResponse
-        }
-
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        let todayString = dateFormatter.string(from: Date())
-
-        let watchedSummary = watchedTitles.prefix(10).joined(separator: ", ")
-        let favSummary = favoriteTitles.prefix(10).joined(separator: ", ")
-
-        let prompt = """
-        Today is \(todayString). You are a movie and TV curator for an IPTV streaming app.
-        User's recently watched titles: \(watchedSummary.isEmpty ? "None yet" : watchedSummary)
-        User's favorite titles (My List): \(favSummary.isEmpty ? "None yet" : favSummary)
-
-        Return ONLY a valid JSON object with these exact keys:
-        {
-          "trendingMovies": [15 popular, trending, and top-rated movies right now (mix of 2024-2026 hits and all-time crowd-pleasers)],
-          "trendingSeries": [15 popular, trending, and top-rated TV series and anime right now],
-          "forYouMovies": [12 movies specifically similar in genre/vibe to the user's watched & favorite titles (or top diverse hits if none)],
-          "forYouSeries": [12 series/anime specifically similar in genre/vibe to the user's watched & favorite titles (or top diverse hits if none)],
-          "forYouReason": "A short 3-6 word label like 'Because you watch Anime & Action' or 'Top Picks for You'"
-        }
-
-        Rules:
-        - Use clean, standard English titles (no years, no extra tags like 4K or HD) so they can be matched against a media catalog.
-        - Output ONLY raw JSON.
-        """
-
-        let body = GeminiCuratorRequest(
-            contents: [.init(parts: [.init(text: prompt)])],
-            generationConfig: .init(temperature: 0.7, responseMimeType: "application/json")
-        )
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
-        request.httpBody = try JSONEncoder().encode(body)
-        request.timeoutInterval = 90
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            let msg = (try? JSONDecoder().decode(GeminiCuratorErrorEnvelope.self, from: data))?.error.message ?? "HTTP \(http.statusCode)"
-            throw SubtitleAITranslatorError.apiError(msg)
-        }
-
-        let decoded = try JSONDecoder().decode(GeminiCuratorResponse.self, from: data)
-        guard let rawText = decoded.candidates?.first?.content?.parts?.first?.text else {
-            throw SubtitleAITranslatorError.invalidResponse
-        }
-
-        let cleanedJSON = rawText
-            .replacingOccurrences(of: "```json", with: "")
-            .replacingOccurrences(of: "```", with: "")
+        let anchorTitle = (watchedTitles.first ?? favoriteTitles.first)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard let jsonData = cleanedJSON.data(using: .utf8) else {
-            throw SubtitleAITranslatorError.invalidResponse
-        }
+        async let moviesTask = fetchCinemetaTop(type: "movie", session: session)
+        async let seriesTask = fetchCinemetaTop(type: "series", session: session)
+        async let animeTask = fetchAniListTrending(session: session)
+        async let topRatedMoviesTask = fetchCinemetaTop(type: "movie", catalog: "imdbRating", session: session)
+        async let similarAnimeTask = fetchAniListSimilar(searchTitle: anchorTitle, session: session)
 
-        let parsed = try JSONDecoder().decode(AIRecommendationPayload.self, from: jsonData)
+        let (topMovies, topSeries, topAnime, ratedMovies, similarAnime) = await (
+            moviesTask,
+            seriesTask,
+            animeTask,
+            topRatedMoviesTask,
+            similarAnimeTask
+        )
+
+        var forYouSeries = similarAnime
+        let forYouReason = (anchorTitle != nil && !similarAnime.isEmpty)
+            ? "Similar to \(anchorTitle!)"
+            : "Top IMDb & Popular Picks"
+
+        if forYouSeries.isEmpty {
+            forYouSeries = Array(topSeries.shuffled().prefix(15))
+        }
+        let forYouMovies = Array((ratedMovies.isEmpty ? topMovies : ratedMovies).shuffled().prefix(15))
+
         let result = AIRecommendationTitles(
-            trendingMovies: parsed.trendingMovies ?? [],
-            trendingSeries: parsed.trendingSeries ?? [],
-            forYouMovies: parsed.forYouMovies ?? [],
-            forYouSeries: parsed.forYouSeries ?? [],
-            forYouReason: parsed.forYouReason,
+            trendingMovies: topMovies,
+            trendingSeries: topSeries,
+            trendingAnime: topAnime,
+            forYouMovies: forYouMovies,
+            forYouSeries: forYouSeries,
+            forYouReason: forYouReason,
             fetchedAt: Date()
         )
 
-        if let cacheData = try? JSONEncoder().encode(result) {
+        if !topMovies.isEmpty || !topSeries.isEmpty || !topAnime.isEmpty,
+           let cacheData = try? JSONEncoder().encode(result) {
             UserDefaults.standard.set(cacheData, forKey: Self.cacheKey)
         }
         return result
     }
-}
 
-private struct GeminiCuratorRequest: Encodable {
-    let contents: [Content]
-    let generationConfig: GenerationConfig
+    // MARK: - Free IMDb/Cinemeta Public Catalogs (No Key, < 0.5s)
 
-    struct Content: Encodable { let parts: [Part] }
-    struct Part: Encodable { let text: String }
-    struct GenerationConfig: Encodable {
-        let temperature: Double
-        let responseMimeType: String
+    private func fetchCinemetaTop(type: String, catalog: String = "top", session: URLSession) async -> [String] {
+        guard let url = URL(string: "https://v3-cinemeta.strem.io/catalog/\(type)/\(catalog).json") else {
+            return []
+        }
+        do {
+            let (data, response) = try await session.data(from: url)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                return []
+            }
+            let decoded = try JSONDecoder().decode(CinemetaResponse.self, from: data)
+            return decoded.metas.compactMap { meta in
+                let name = meta.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                return name.isEmpty ? nil : name
+            }
+        } catch {
+            return []
+        }
+    }
+
+    // MARK: - Free AniList Public GraphQL API (No Key, < 0.5s)
+
+    private func fetchAniListTrending(session: URLSession) async -> [String] {
+        let query = """
+        query {
+          Page(page: 1, perPage: 25) {
+            media(type: ANIME, sort: TRENDING_DESC, isAdult: false) {
+              title { english romaji }
+            }
+          }
+        }
+        """
+        guard let response = await postAniList(query: query, variables: nil, session: session) else {
+            return []
+        }
+        let media = response.data?.Page?.media ?? []
+        return media.compactMap { item in
+            let title = item.title?.english ?? item.title?.romaji
+            return title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func fetchAniListSimilar(searchTitle: String?, session: URLSession) async -> [String] {
+        guard let raw = searchTitle, !raw.isEmpty else { return [] }
+        let cleaned = OpenSubtitlesService.cleanSearchQuery(from: raw, kind: .episode).query
+        guard cleaned.count >= 2 else { return [] }
+
+        let query = """
+        query ($search: String) {
+          Media(search: $search, type: ANIME) {
+            recommendations(sort: RATING_DESC, perPage: 20) {
+              nodes {
+                mediaRecommendation {
+                  title { english romaji }
+                }
+              }
+            }
+          }
+        }
+        """
+        guard let response = await postAniList(query: query, variables: ["search": cleaned], session: session) else {
+            return []
+        }
+        let nodes = response.data?.Media?.recommendations?.nodes ?? []
+        return nodes.compactMap { node in
+            let t = node.mediaRecommendation?.title
+            return (t?.english ?? t?.romaji)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+    }
+
+    private func postAniList(query: String, variables: [String: String]?, session: URLSession) async -> AniListGraphQLResponse? {
+        guard let url = URL(string: "https://graphql.anilist.co") else { return nil }
+        var body: [String: Any] = ["query": query]
+        if let variables { body["variables"] = variables }
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = bodyData
+
+        do {
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                return nil
+            }
+            return try JSONDecoder().decode(AniListGraphQLResponse.self, from: data)
+        } catch {
+            return nil
+        }
     }
 }
 
-private struct GeminiCuratorResponse: Decodable {
-    let candidates: [Candidate]?
-    struct Candidate: Decodable { let content: Content? }
-    struct Content: Decodable { let parts: [Part]? }
-    struct Part: Decodable { let text: String? }
+// MARK: - Public Catalog DTOs
+
+private struct CinemetaResponse: Decodable {
+    let metas: [Meta]
+    struct Meta: Decodable {
+        let name: String
+    }
 }
 
-private struct AIRecommendationPayload: Decodable {
-    let trendingMovies: [String]?
-    let trendingSeries: [String]?
-    let forYouMovies: [String]?
-    let forYouSeries: [String]?
-    let forYouReason: String?
-}
+private struct AniListGraphQLResponse: Decodable {
+    let data: DataNode?
 
-private struct GeminiCuratorErrorEnvelope: Decodable {
-    let error: ErrorDetail
-    struct ErrorDetail: Decodable {
-        let message: String
+    struct DataNode: Decodable {
+        let Page: PageNode?
+        let Media: MediaNode?
+    }
+
+    struct PageNode: Decodable {
+        let media: [MediaItem]?
+    }
+
+    struct MediaNode: Decodable {
+        let recommendations: RecommendationConnection?
+    }
+
+    struct RecommendationConnection: Decodable {
+        let nodes: [RecommendationNode]?
+    }
+
+    struct RecommendationNode: Decodable {
+        let mediaRecommendation: MediaItem?
+    }
+
+    struct MediaItem: Decodable {
+        let title: TitleNode?
+    }
+
+    struct TitleNode: Decodable {
+        let english: String?
+        let romaji: String?
     }
 }

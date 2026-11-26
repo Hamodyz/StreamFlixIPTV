@@ -275,6 +275,14 @@ struct NetflixHomeView: View {
                     )
                 }
 
+                if !catalogVM.trendingAnime.isEmpty {
+                    SeriesCarouselRow(
+                        title: "Trending Anime 🎌",
+                        series: catalogVM.trendingAnime,
+                        onSelect: { selectedSeries = $0 }
+                    )
+                }
+
                 ForEach(catalogVM.vodCategories.prefix(6)) { category in
                     let items = catalogVM.movies(for: category.categoryId)
                     if !items.isEmpty {
@@ -446,7 +454,7 @@ private struct HomeDashboardHeader: View {
                                 Image(systemName: "sparkles")
                                     .foregroundStyle(Color(red: 0.898, green: 0.035, blue: 0.078))
                             }
-                            Text("AI Picks")
+                            Text("Top Picks")
                                 .font(.caption.bold())
                                 .foregroundStyle(.white)
                         }
